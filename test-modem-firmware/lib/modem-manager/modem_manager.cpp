@@ -301,6 +301,7 @@ bool ModemMqtt::sendPayload(const char* data, size_t length) {
 
   return response.indexOf("OK") >= 0;
 }
+
 bool ModemMqtt::connect(const char* host, uint16_t port, const char* clientId,
                         uint8_t retries, uint32_t retryDelayMs,
                         const char* user, const char* pass) {
@@ -403,6 +404,50 @@ bool ModemMqtt::publishJson(const char* topic, const char* json, int qos,
 
   modem_.logValue("[mqtt] publish raw", response);
   return false;
+}
+
+bool ModemMqtt::publishToUbidots(const char* token,
+                                 const char* deviceLabel,
+                                 const char* variableLabel,
+                                 float value) {
+  if (!token || !deviceLabel || !variableLabel) {
+    return false;
+  }
+
+  if (!modem_.isDataReady() && !modem_.connectGprs()) {
+    modem_.logLine("[ubidots] data not ready");
+    return false;
+  }
+
+  const char* host = "industrial.api.ubidots.com";
+  uint16_t port = 8883;
+
+  modem_.logLine("[ubidots] mqtt connect");
+
+  // En Ubidots el token como user funciona.
+  // En el módem SIMCom usar password vacío explícito ("") puede dar ERROR,
+  // así que se envía también el token como password para evitar ese problema.
+  if (!connect(host, port, "esp001", 3, 2000, token, token)) {
+    modem_.logLine("[ubidots] connect failed");
+    return false;
+  }
+
+  String topic = String("/v1.6/devices/") + deviceLabel;
+  String payload = String("{\"") + variableLabel + "\":" + String(value, 2) + "}";
+
+  modem_.logValue("[ubidots] topic", topic);
+  modem_.logValue("[ubidots] payload", payload);
+
+  bool ok = publishJson(topic.c_str(), payload.c_str(), 1, false);
+
+  if (ok) {
+    modem_.logLine("[ubidots] publish ok");
+  } else {
+    modem_.logLine("[ubidots] publish failed");
+  }
+
+  disconnect();
+  return ok;
 }
 void ModemMqtt::disconnect() {
   if (connected_) {

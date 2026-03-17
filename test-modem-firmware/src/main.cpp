@@ -82,6 +82,16 @@ static void logModem(const String& line) {
   dashboard.pushLine(DashboardSource::Modem, line);
 }
 
+static void publishUbidotsTest() {
+  logUsb("Ubidots publish...");
+  if (mqtt.publishToUbidots("BBUS-orL2zH4XNEKC0880tXUcuxdTWpX5R8",
+                            "aqcuicola-001", "test-in", 25.4f)) {
+    logUsb("Ubidots OK");
+  } else {
+    logUsb("Ubidots failed");
+  }
+}
+
 static void readSerialLines(Stream& stream, String& buffer,
                             DashboardSource src) {
   while (stream.available()) {
@@ -148,8 +158,6 @@ static void modemTask(void* pv) {
     logUsb("Data session failed");
   }
 
-  // Dar tiempo a que las URC tardías terminen de llegar.
-  // delay(2000);
 
   // logUsb("HTTP test (example.com)...");
   // if (modem.httpGetNative("http://example.com/", 64)) {
@@ -158,21 +166,23 @@ static void modemTask(void* pv) {
   //   logUsb("HTTP failed");
   // }
 
-  String payload = String("{\"device\":\"esp001\",\"msg\":\"hello\",\"ts\":") +
-                   millis() + "}";
-  logUsb("MQTT connect...");
-  if (mqtt.connect("b282c2526e92497b9e5d5741f7483e22.s1.eu.hivemq.cloud", 8883,
-                   "esp001", 3, 2000, "testesp001", "Testesp001+")) {
-    logUsb("MQTT connected");
-    if (mqtt.publishJson("esp001", payload.c_str(), 1, false)) {
-      logUsb("MQTT publish OK");
-    } else {
-      logUsb("MQTT publish failed");
-    }
-    mqtt.disconnect();
-  } else {
-    logUsb("MQTT connect failed");
-  }
+  // String payload = String("{\"device\":\"esp001\",\"msg\":\"hello\",\"ts\":") +
+  //                  millis() + "}";
+  // logUsb("MQTT connect...");
+  // if (mqtt.connect("b282c2526e92497b9e5d5741f7483e22.s1.eu.hivemq.cloud", 8883,
+  //                  "esp001", 3, 2000, "testesp001", "Testesp001+")) {
+  //   logUsb("MQTT connected");
+  //   if (mqtt.publishJson("esp001", payload.c_str(), 1, false)) {
+  //     logUsb("MQTT publish OK");
+  //   } else {
+  //     logUsb("MQTT publish failed");
+  //   }
+  //   mqtt.disconnect();
+  // } else {
+  //   logUsb("MQTT connect failed");
+  // }
+
+  publishUbidotsTest();
 
   modemInUse = false;
   vTaskDelete(nullptr);

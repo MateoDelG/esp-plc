@@ -125,6 +125,8 @@ class ModemMqtt {
                const char* user = nullptr, const char* pass = nullptr);
   bool publishJson(const char* topic, const char* json, int qos = 0,
                    bool retain = false);
+  bool publishToUbidots(const char* token, const char* deviceLabel,
+                        const char* variableLabel, float value);
   void disconnect();
 
   bool isConnected() const { return connected_; }
