@@ -140,7 +140,289 @@ static void parseHttpUrl(const char* url, String& hostOut, String& pathOut) {
 ModemManager::ModemManager(const ModemConfig& config)
     : config_(config),
       tapStream_(config.serialAT, config.modemLogSink),
-      modem_(tapStream_) {}
+      modem_(tapStream_),
+      mqtt_(*this) {}
+
+
+
+
+
+
+ModemMqtt::ModemMqtt(ModemManager& modem) : modem_(modem) {}
+
+bool ModemMqtt::start() {
+  if (started_) {
+    return true;
+  }
+
+  String response;
+  modem_.modem_.sendAT(GF("+CMQTTSTART"));
+  int res = modem_.modem_.waitResponse(10000L, response);
+
+  // En la práctica, si responde OK, el servicio suele arrancar y la URC
+  // puede llegar aparte o perderse del buffer de waitResponse.
+  if (res == 1 || response.indexOf("OK") >= 0 ||
+      response.indexOf("+CMQTTSTART: 0") >= 0) {
+    started_ = true;
+    return true;
+  }
+
+  // Si ya estaba iniciado, también lo tratamos como éxito.
+  if (response.indexOf("+CMQTTSTART: 23") >= 0 ||
+      response.indexOf("already") >= 0 ||
+      response.indexOf("ERROR") >= 0) {
+    started_ = true;
+    return true;
+  }
+
+  modem_.logValue("[mqtt] start raw", response);
+  return false;
+}
+
+bool ModemMqtt::acquire(const char* clientId) {
+  if (!clientId || strlen(clientId) == 0) {
+    return false;
+  }
+
+  String response;
+  modem_.modem_.sendAT(GF("+CMQTTACCQ=0,\""), clientId, GF("\",1"));
+  int res = modem_.modem_.waitResponse(10000L, response);
+
+  if (res == 1 && response.indexOf("OK") >= 0) {
+    acquired_ = true;
+    return true;
+  }
+
+  if (response.indexOf("+CMQTTACCQ: 0,0") >= 0) {
+    acquired_ = true;
+    return true;
+  }
+
+  modem_.logValue("[mqtt] accq raw", response);
+  return false;
+}
+
+bool ModemMqtt::connectBroker(const char* host, uint16_t port,
+                              const char* user, const char* pass) {
+  if (!host || strlen(host) == 0) {
+    return false;
+  }
+
+  if (connected_) {
+    return true;
+  }
+
+  if (!modem_.isDataReady() && !modem_.connectGprs()) {
+    modem_.logLine("[mqtt] data not ready");
+    return false;
+  }
+
+  if (!modem_.waitNetOpen(5000UL)) {
+    modem_.logLine("[mqtt] netopen not ready");
+    return false;
+  }
+
+  // TLS setup
+  modem_.modem_.sendAT(GF("+CSSLCFG=\"sslversion\",0,4"));
+  modem_.modem_.waitResponse(3000L);
+
+  modem_.modem_.sendAT(GF("+CSSLCFG=\"authmode\",0,0"));
+  modem_.modem_.waitResponse(3000L);
+
+  modem_.modem_.sendAT(GF("+CSSLCFG=\"enableSNI\",0,1"));
+  modem_.modem_.waitResponse(3000L);
+
+  // No trates ERROR aquí como fatal; puede ya estar asociado
+  String response;
+  modem_.modem_.sendAT(GF("+CMQTTSSLCFG=0,0"));
+  modem_.modem_.waitResponse(3000L, response);
+
+  response = "";
+  if (user && pass && strlen(user) > 0) {
+    modem_.modem_.sendAT(GF("+CMQTTCONNECT=0,\"tcp://"), host, GF(":"),
+                         port, GF("\",60,1,\""), user, GF("\",\""),
+                         pass, GF("\""));
+  } else {
+    modem_.modem_.sendAT(GF("+CMQTTCONNECT=0,\"tcp://"), host, GF(":"),
+                         port, GF("\",60,1"));
+  }
+
+  // 1) Esperar respuesta inmediata al comando
+  modem_.modem_.waitResponse(15000L, response);
+
+  // 2) Si el éxito ya vino ahí mismo
+  if (response.indexOf("+CMQTTCONNECT: 0,0") >= 0) {
+    connected_ = true;
+    return true;
+  }
+
+  // 3) La URC puede llegar más tarde: leer directo del stream
+  uint32_t startMs = millis();
+  while (millis() - startMs < 15000UL) {
+    while (modem_.tapStream_.available()) {
+      char c = static_cast<char>(modem_.tapStream_.read());
+      response += c;
+    }
+
+    if (response.indexOf("+CMQTTCONNECT: 0,0") >= 0) {
+      connected_ = true;
+      return true;
+    }
+
+    // Si llegó otro código distinto de 0,0, salimos
+    int idx = response.indexOf("+CMQTTCONNECT: 0,");
+    if (idx >= 0 && response.indexOf("+CMQTTCONNECT: 0,0") < 0) {
+      break;
+    }
+
+    delay(20);
+  }
+
+  modem_.logValue("[mqtt] connect raw", response);
+  connected_ = false;
+  return false;
+}
+
+bool ModemMqtt::sendPayload(const char* data, size_t length) {
+  if (!data || length == 0) {
+    return false;
+  }
+
+  int res = modem_.modem_.waitResponse(5000L, GF(">"), GF("ERROR"),
+                                       GF("+CME ERROR"));
+  if (res != 1) {
+    return false;
+  }
+
+  modem_.tapStream_.write(reinterpret_cast<const uint8_t*>(data), length);
+
+  String response;
+  modem_.modem_.waitResponse(5000L, response);
+
+  return response.indexOf("OK") >= 0;
+}
+bool ModemMqtt::connect(const char* host, uint16_t port, const char* clientId,
+                        uint8_t retries, uint32_t retryDelayMs,
+                        const char* user, const char* pass) {
+  if (!host || strlen(host) == 0) {
+    return false;
+  }
+
+  if (connected_) {
+    return true;
+  }
+
+  if (!start()) {
+    modem_.logLine("[mqtt] start failed");
+    return false;
+  }
+
+  if (!acquire(clientId)) {
+    modem_.logLine("[mqtt] acquire failed");
+    return false;
+  }
+
+  for (uint8_t attempt = 0; attempt < retries; ++attempt) {
+    modem_.logLine(String("[mqtt] broker connect attempt ") +
+                   (attempt + 1) + "/" + retries);
+
+    if (connectBroker(host, port, user, pass)) {
+      return true;
+    }
+
+    if (connected_) {
+      return true;
+    }
+
+    delay(retryDelayMs);
+  }
+
+  return false;
+}
+
+bool ModemMqtt::publishJson(const char* topic, const char* json, int qos,
+                            bool retain) {
+  if (!connected_ || !topic || !json) {
+    return false;
+  }
+
+  size_t topicLen = strlen(topic);
+  size_t payloadLen = strlen(json);
+
+  modem_.modem_.sendAT(GF("+CMQTTTOPIC=0,"), topicLen);
+  if (!sendPayload(topic, topicLen)) {
+    modem_.logLine("[mqtt] topic payload failed");
+    return false;
+  }
+
+  delay(30);
+
+  modem_.modem_.sendAT(GF("+CMQTTPAYLOAD=0,"), payloadLen);
+  if (!sendPayload(json, payloadLen)) {
+    modem_.logLine("[mqtt] message payload failed");
+    return false;
+  }
+
+  delay(30);
+
+  String response;
+  int mqttQos = constrain(qos, 0, 2);
+  int mqttRetain = retain ? 1 : 0;
+
+  modem_.modem_.sendAT(GF("+CMQTTPUB=0,"), mqttQos, GF(",60,"), mqttRetain);
+
+  // Respuesta inmediata
+  modem_.modem_.waitResponse(10000L, response);
+
+  // Si el éxito ya vino aquí mismo
+  if (response.indexOf("+CMQTTPUB: 0,0") >= 0) {
+    return true;
+  }
+
+  // Si vino OK, la URC puede llegar después
+  if (response.indexOf("OK") >= 0 || response.length() == 0) {
+    uint32_t startMs = millis();
+    while (millis() - startMs < 10000UL) {
+      while (modem_.tapStream_.available()) {
+        char c = static_cast<char>(modem_.tapStream_.read());
+        response += c;
+      }
+
+      if (response.indexOf("+CMQTTPUB: 0,0") >= 0) {
+        return true;
+      }
+
+      int idx = response.indexOf("+CMQTTPUB: 0,");
+      if (idx >= 0 && response.indexOf("+CMQTTPUB: 0,0") < 0) {
+        break;
+      }
+
+      delay(20);
+    }
+  }
+
+  modem_.logValue("[mqtt] publish raw", response);
+  return false;
+}
+void ModemMqtt::disconnect() {
+  if (connected_) {
+    modem_.modem_.sendAT(GF("+CMQTTDISC=0,60"));
+    modem_.modem_.waitResponse(5000L);
+    connected_ = false;
+  }
+
+  if (acquired_) {
+    modem_.modem_.sendAT(GF("+CMQTTREL=0"));
+    modem_.modem_.waitResponse(5000L);
+    acquired_ = false;
+  }
+
+  if (started_) {
+    modem_.modem_.sendAT(GF("+CMQTTSTOP"));
+    modem_.modem_.waitResponse(5000L);
+    started_ = false;
+  }
+}
 
 void ModemManager::setLogsEnabled(bool enabled) { config_.enableLogs = enabled; }
 
@@ -216,6 +498,7 @@ bool ModemManager::begin() {
 
   return waitForNetwork();
 }
+
 bool ModemManager::waitForNetwork() {
   for (uint8_t attempt = 0; attempt < config_.networkRetries; ++attempt) {
     if (modem_.waitForNetwork(config_.networkTimeoutMs)) {

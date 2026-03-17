@@ -61,6 +61,7 @@ class TapStream : public Stream {
   TapStream(Stream& inner, ModemLogSink sink) : inner_(inner), sink_(sink) {}
 
   int available() override { return inner_.available(); }
+
   int read() override {
     int c = inner_.read();
     if (c >= 0) {
@@ -69,7 +70,9 @@ class TapStream : public Stream {
     }
     return c;
   }
+
   int peek() override { return inner_.peek(); }
+
   void flush() override { inner_.flush(); }
 
   size_t write(uint8_t c) override {
@@ -107,6 +110,34 @@ class TapStream : public Stream {
   String rxBuffer_;
 };
 
+class ModemManager;
+
+class ModemMqtt {
+ public:
+  explicit ModemMqtt(ModemManager& modem);
+
+  bool start();
+  bool acquire(const char* clientId);
+  bool connectBroker(const char* host, uint16_t port,
+                     const char* user = nullptr, const char* pass = nullptr);
+  bool connect(const char* host, uint16_t port, const char* clientId,
+               uint8_t retries = 3, uint32_t retryDelayMs = 2000,
+               const char* user = nullptr, const char* pass = nullptr);
+  bool publishJson(const char* topic, const char* json, int qos = 0,
+                   bool retain = false);
+  void disconnect();
+
+  bool isConnected() const { return connected_; }
+
+ private:
+  bool sendPayload(const char* data, size_t length);
+
+  ModemManager& modem_;
+  bool started_ = false;
+  bool acquired_ = false;
+  bool connected_ = false;
+};
+
 class ModemManager {
  public:
   explicit ModemManager(const ModemConfig& config);
@@ -140,7 +171,11 @@ class ModemManager {
   int16_t getSignalStrengthPercent();
   ModemInfo getNetworkInfo();
 
+  ModemMqtt& mqtt() { return mqtt_; }
+
  private:
+  friend class ModemMqtt;
+
   void logLine(const String& message);
   void logValue(const String& label, const String& value);
   void logValue(const String& label, int value);
@@ -154,6 +189,7 @@ class ModemManager {
 #endif
 
   TinyGsm modem_;
+  ModemMqtt mqtt_;
 };
 
 #endif  // MODEM_MANAGER_H

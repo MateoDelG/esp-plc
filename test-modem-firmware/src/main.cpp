@@ -36,6 +36,7 @@ static ModemConfig modemConfig = {
 };
 
 static ModemManager modem(modemConfig);
+static ModemMqtt mqtt(modem);
 
 static String usbLine;
 static volatile bool modemInUse = false;
@@ -148,13 +149,29 @@ static void modemTask(void* pv) {
   }
 
   // Dar tiempo a que las URC tardías terminen de llegar.
-  delay(2000);
+  // delay(2000);
 
-  logUsb("HTTP test (example.com)...");
-  if (modem.httpGetNative("http://example.com/", 64)) {
-    logUsb("HTTP OK");
+  // logUsb("HTTP test (example.com)...");
+  // if (modem.httpGetNative("http://example.com/", 64)) {
+  //   logUsb("HTTP OK");
+  // } else {
+  //   logUsb("HTTP failed");
+  // }
+
+  String payload = String("{\"device\":\"esp001\",\"msg\":\"hello\",\"ts\":") +
+                   millis() + "}";
+  logUsb("MQTT connect...");
+  if (mqtt.connect("b282c2526e92497b9e5d5741f7483e22.s1.eu.hivemq.cloud", 8883,
+                   "esp001", 3, 2000, "testesp001", "Testesp001+")) {
+    logUsb("MQTT connected");
+    if (mqtt.publishJson("esp001", payload.c_str(), 1, false)) {
+      logUsb("MQTT publish OK");
+    } else {
+      logUsb("MQTT publish failed");
+    }
+    mqtt.disconnect();
   } else {
-    logUsb("HTTP failed");
+    logUsb("MQTT connect failed");
   }
 
   modemInUse = false;
