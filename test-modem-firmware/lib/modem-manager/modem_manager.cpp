@@ -291,7 +291,24 @@ bool ModemMqtt::sendPayload(const char* data, size_t length) {
   int res = modem_.modem_.waitResponse(5000L, GF(">"), GF("ERROR"),
                                        GF("+CME ERROR"));
   if (res != 1) {
-    return false;
+    uint32_t start = millis();
+    bool gotPrompt = false;
+    while (millis() - start < 3000UL) {
+      while (modem_.tapStream_.available()) {
+        char c = static_cast<char>(modem_.tapStream_.read());
+        if (c == '>') {
+          gotPrompt = true;
+          break;
+        }
+      }
+      if (gotPrompt) {
+        break;
+      }
+      delay(5);
+    }
+    if (!gotPrompt) {
+      return false;
+    }
   }
 
   modem_.tapStream_.write(reinterpret_cast<const uint8_t*>(data), length);
@@ -300,6 +317,42 @@ bool ModemMqtt::sendPayload(const char* data, size_t length) {
   modem_.modem_.waitResponse(5000L, response);
 
   return response.indexOf("OK") >= 0;
+}
+
+bool ModemMqtt::readExact(size_t length, String& out, uint32_t timeoutMs) {
+  out = "";
+  out.reserve(length + 4);
+  uint32_t start = millis();
+  while (out.length() < length && millis() - start < timeoutMs) {
+    while (modem_.tapStream_.available() && out.length() < length) {
+      char c = static_cast<char>(modem_.tapStream_.read());
+      out += c;
+    }
+    delay(5);
+  }
+  return out.length() == length;
+}
+
+bool ModemMqtt::parseRxStart(const String& line, uint16_t& topicLen,
+                             uint16_t& payloadLen) {
+  if (!line.startsWith("+CMQTTRXSTART:")) {
+    return false;
+  }
+  int firstComma = line.indexOf(',');
+  if (firstComma < 0) {
+    return false;
+  }
+  int secondComma = line.indexOf(',', firstComma + 1);
+  if (secondComma < 0) {
+    return false;
+  }
+  String topicStr = line.substring(firstComma + 1, secondComma);
+  String payloadStr = line.substring(secondComma + 1);
+  topicStr.trim();
+  payloadStr.trim();
+  topicLen = static_cast<uint16_t>(topicStr.toInt());
+  payloadLen = static_cast<uint16_t>(payloadStr.toInt());
+  return topicLen > 0 && payloadLen > 0;
 }
 
 bool ModemMqtt::connect(const char* host, uint16_t port, const char* clientId,
@@ -448,6 +501,112 @@ bool ModemMqtt::publishToUbidots(const char* token,
 
   disconnect();
   return ok;
+}
+
+bool ModemMqtt::subscribeToUbidots(const char* deviceLabel,
+                                   const char* variableLabel) {
+  if (!connected_ || !deviceLabel || !variableLabel) {
+    return false;
+  }
+
+  String topic = String("/v1.6/devices/") + deviceLabel + "/" +
+                 variableLabel + "/lv";
+  size_t topicLen = topic.length();
+  const int qos = 1;
+
+  for (uint8_t attempt = 0; attempt < 3; ++attempt) {
+    String response;
+
+    // Sintaxis correcta: client, length, qos
+    modem_.modem_.sendAT(GF("+CMQTTSUBTOPIC=0,"), topicLen, GF(","), qos);
+    if (!sendPayload(topic.c_str(), topicLen)) {
+      modem_.logLine("[mqtt] sub topic failed");
+      delay(1000);
+      continue;
+    }
+
+    response = "";
+    // Después de CMQTTSUBTOPIC, se ejecuta CMQTTSUB con client y dup opcional
+    modem_.modem_.sendAT(GF("+CMQTTSUB=0,0"));
+    modem_.modem_.waitResponse(10000L, response);
+
+    if (response.indexOf("+CMQTTSUB: 0,0") >= 0) {
+      return true;
+    }
+
+    if (response.indexOf("OK") >= 0 || response.length() == 0) {
+      uint32_t startMs = millis();
+      while (millis() - startMs < 10000UL) {
+        String extra;
+        modem_.modem_.waitResponse(2000L, extra);
+        response += extra;
+
+        if (response.indexOf("+CMQTTSUB: 0,0") >= 0) {
+          return true;
+        }
+
+        int idx = response.indexOf("+CMQTTSUB: 0,");
+        if (idx >= 0 && response.indexOf("+CMQTTSUB: 0,0") < 0) {
+          break;
+        }
+      }
+    }
+
+    modem_.logValue("[mqtt] sub raw", response);
+    delay(1000);
+  }
+
+  return false;
+}
+bool ModemMqtt::pollIncomingUbidots(const char* deviceLabel,
+                                    const char* variableLabel) {
+  if (!connected_) {
+    return false;
+  }
+
+  while (modem_.tapStream_.available()) {
+    char c = static_cast<char>(modem_.tapStream_.read());
+    rxLineBuffer_ += c;
+    if (c != '\n') {
+      continue;
+    }
+
+    String line = rxLineBuffer_;
+    rxLineBuffer_ = "";
+    line.trim();
+
+    uint16_t topicLen = 0;
+    uint16_t payloadLen = 0;
+    if (!parseRxStart(line, topicLen, payloadLen)) {
+      continue;
+    }
+
+    String topic;
+    String payload;
+    if (!readExact(topicLen, topic, 5000)) {
+      return false;
+    }
+    if (!readExact(payloadLen, payload, 5000)) {
+      return false;
+    }
+
+    while (modem_.tapStream_.available()) {
+      char t = static_cast<char>(modem_.tapStream_.peek());
+      if (t == '\r' || t == '\n') {
+        modem_.tapStream_.read();
+      } else {
+        break;
+      }
+    }
+
+    if (topic.indexOf(deviceLabel) >= 0 &&
+        topic.indexOf(variableLabel) >= 0) {
+      modem_.logLine(String("[Ubidots] ") + variableLabel + ": " + payload);
+      return true;
+    }
+  }
+
+  return false;
 }
 void ModemMqtt::disconnect() {
   if (connected_) {

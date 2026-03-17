@@ -40,6 +40,11 @@ static ModemMqtt mqtt(modem);
 
 static String usbLine;
 static volatile bool modemInUse = false;
+static volatile bool modemTaskDone = false;
+
+static const char kUbiToken[] = "BBUS-orL2zH4XNEKC0880tXUcuxdTWpX5R8";
+static const char kUbiDevice[] = "aqcuicola-001";
+static const char kUbiVariable[] = "test-out";
 
 static void setupWifi() {
   const char* ssid = "Delga";
@@ -89,6 +94,59 @@ static void publishUbidotsTest() {
     logUsb("Ubidots OK");
   } else {
     logUsb("Ubidots failed");
+  }
+}
+
+static void ubidotsTask(void* pv) {
+  (void)pv;
+
+  while (!modemTaskDone) {
+    vTaskDelay(pdMS_TO_TICKS(500));
+  }
+
+  bool publishedOnce = false;
+  bool subscribed = false;
+
+  for (;;) {
+    if (!mqtt.isConnected()) {
+      logUsb("Ubidots MQTT connect...");
+      if (mqtt.connect("industrial.api.ubidots.com", 8883, "esp001", 3, 2000,
+                       kUbiToken, kUbiToken)) {
+        logUsb("Ubidots MQTT connected");
+        subscribed = false;
+        publishedOnce = false;
+      } else {
+        logUsb("Ubidots MQTT connect failed");
+        vTaskDelay(pdMS_TO_TICKS(5000));
+        continue;
+      }
+    }
+
+    if (!subscribed) {
+      if (mqtt.subscribeToUbidots(kUbiDevice, kUbiVariable)) {
+        logUsb("Ubidots subscribe ok");
+        subscribed = true;
+      } else {
+        logUsb("Ubidots subscribe failed");
+        vTaskDelay(pdMS_TO_TICKS(2000));
+        continue;
+      }
+    }
+
+    if (subscribed && !publishedOnce) {
+      float value = static_cast<float>(random(0, 101));
+      String topic = String("/v1.6/devices/") + kUbiDevice;
+      String payload = String("{\"test-in\":") + String(value, 2) + "}";
+      if (mqtt.publishJson(topic.c_str(), payload.c_str(), 1, false)) {
+        logUsb(String("Ubidots publish ok: ") + payload);
+      } else {
+        logUsb("Ubidots publish failed");
+      }
+      publishedOnce = true;
+    }
+
+    mqtt.pollIncomingUbidots(kUbiDevice, kUbiVariable);
+    vTaskDelay(pdMS_TO_TICKS(300));
   }
 }
 
@@ -185,18 +243,22 @@ static void modemTask(void* pv) {
   publishUbidotsTest();
 
   modemInUse = false;
+  modemTaskDone = true;
   vTaskDelete(nullptr);
 }
 
 void setup() {
   Serial.begin(115200);
   setupWifi();
+  randomSeed(millis());
 
   dashboard.begin(server, ws);
   server.begin();
   ws.begin();
 
   xTaskCreatePinnedToCore(modemTask, "modemTask", 8192, nullptr, 1, nullptr, 1);
+  xTaskCreatePinnedToCore(ubidotsTask, "ubidotsTask", 8192, nullptr, 1, nullptr,
+                          1);
 }
 
 void loop() {

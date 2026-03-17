@@ -127,17 +127,23 @@ class ModemMqtt {
                    bool retain = false);
   bool publishToUbidots(const char* token, const char* deviceLabel,
                         const char* variableLabel, float value);
+  bool subscribeToUbidots(const char* deviceLabel, const char* variableLabel);
+  bool pollIncomingUbidots(const char* deviceLabel, const char* variableLabel);
   void disconnect();
 
   bool isConnected() const { return connected_; }
 
  private:
   bool sendPayload(const char* data, size_t length);
+  bool readExact(size_t length, String& out, uint32_t timeoutMs = 3000);
+  bool parseRxStart(const String& line, uint16_t& topicLen,
+                    uint16_t& payloadLen);
 
   ModemManager& modem_;
   bool started_ = false;
   bool acquired_ = false;
   bool connected_ = false;
+  String rxLineBuffer_;
 };
 
 class ModemManager {
