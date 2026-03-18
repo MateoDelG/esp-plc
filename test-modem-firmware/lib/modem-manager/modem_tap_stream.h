@@ -24,6 +24,7 @@ class ModemTapStream : public Stream {
  private:
   void handleByte(bool isTx, char c);
   void emitLine(bool isTx, String& buffer, bool& overflowed);
+  bool isMqttCloseOkLine(const String& line) const;
 
   static const size_t kMaxLineLength = 256;
 
@@ -33,6 +34,7 @@ class ModemTapStream : public Stream {
   String rxBuffer_;
   bool txOverflowed_ = false;
   bool rxOverflowed_ = false;
+  bool lastCloseOk_ = false;
 };
 
 #endif

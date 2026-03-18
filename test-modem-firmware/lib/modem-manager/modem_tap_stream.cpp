@@ -63,7 +63,43 @@ void ModemTapStream::emitLine(bool isTx, String& buffer, bool& overflowed) {
     return;
   }
 
-  callback_(isTx, buffer);
+  String line = buffer;
+  if (lastCloseOk_ && line == "ERROR") {
+    lastCloseOk_ = false;
+    buffer = "";
+    overflowed = false;
+    return;
+  }
+  if (line.length() > 0) {
+    lastCloseOk_ = isMqttCloseOkLine(line);
+  }
+  if (overflowed) {
+    if (line.length() == 0) {
+      line = "[truncated]";
+    } else {
+      line += " [truncated]";
+    }
+  }
+  callback_(isTx, line);
   buffer = "";
   overflowed = false;
+}
+
+bool ModemTapStream::isMqttCloseOkLine(const String& line) const {
+  if (!line.startsWith("+CMQTT")) {
+    return false;
+  }
+  if (!(line.startsWith("+CMQTTDISC:") || line.startsWith("+CMQTTREL:") ||
+        line.startsWith("+CMQTTSTOP:"))) {
+    return false;
+  }
+
+  int comma = line.lastIndexOf(',');
+  if (comma < 0) {
+    return false;
+  }
+  String codeStr = line.substring(comma + 1);
+  codeStr.trim();
+  int code = codeStr.toInt();
+  return code == 0 || code == 11 || code == 14 || code == 19 || code == 20;
 }

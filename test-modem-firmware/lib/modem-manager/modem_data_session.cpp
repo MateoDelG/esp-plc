@@ -60,13 +60,26 @@ bool ModemDataSession::ensureNetOpen() {
                    GF("\""));
 
   modem_.logLine("[data] NETOPEN start");
-  AtResult res = modem_.at().exec(8000L, GF("+NETOPEN"));
-  if (ModemParsers::responseHasAlreadyOpened(res.raw)) {
-    modem_.logLine("[data] NETOPEN already opened");
-    return waitNetOpen(8000UL);
+  for (uint8_t attempt = 0; attempt < 2; ++attempt) {
+    AtResult res = modem_.at().exec(8000L, GF("+NETOPEN"));
+    if (ModemParsers::responseHasAlreadyOpened(res.raw)) {
+      modem_.logLine("[data] NETOPEN already opened");
+      return true;
+    }
+
+    String urcLine;
+    if (modem_.at().waitUrc(UrcType::NetOpen, 15000UL, urcLine)) {
+      int status = ModemParsers::parseNetOpenStatus(urcLine);
+      if (status == 1) {
+        modem_.logLine("[data] netopen active");
+        return true;
+      }
+    }
   }
 
-  return waitNetOpen(15000UL);
+  modem_.setLastError(-20, "netopen urc timeout");
+  modem_.logLine("[data] netopen urc timeout");
+  return false;
 }
 
 bool ModemDataSession::hasDataSession() {

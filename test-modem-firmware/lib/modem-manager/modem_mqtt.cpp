@@ -6,7 +6,7 @@
 ModemMqtt::ModemMqtt(ModemManager& modem) : modem_(modem) {}
 
 static bool isMqttOkCode(int code) {
-  return code == 0 || code == 14 || code == 19;
+  return code == 0 || code == 11 || code == 14 || code == 19 || code == 20;
 }
 
 void ModemMqtt::resetService() {
@@ -58,6 +58,7 @@ bool ModemMqtt::ensureStarted() {
     return true;
   }
 
+  bool didReset = needsReset_;
   if (needsReset_) {
     resetService();
     needsReset_ = false;
@@ -71,52 +72,36 @@ bool ModemMqtt::ensureStarted() {
   while (modem_.urc().pop(UrcType::MqttDisc, drain)) {
   }
 
-  modem_.at().exec(3000L, GF("+CMQTTSTOP"));
-  String stopLine;
-  modem_.at().waitUrc(UrcType::MqttStop, 5000UL, stopLine);
-  delay(1200);
-
-  AtResult res = modem_.at().exec(10000L, GF("+CMQTTSTART"));
-  if (res.ok || res.raw.indexOf("+CMQTTSTART: 0") >= 0) {
-    started_ = true;
-    modem_.setState(ModemState::MqttStarted);
-    return true;
+  if (!didReset) {
+    modem_.at().exec(3000L, GF("+CMQTTSTOP"));
+    String stopLine;
+    modem_.at().waitUrc(UrcType::MqttStop, 5000UL, stopLine);
+    delay(1200);
   }
 
-  if (res.raw.indexOf("+CMQTTSTART: 23") >= 0 ||
-      res.raw.indexOf("already") >= 0) {
-    started_ = true;
-    modem_.setState(ModemState::MqttStarted);
-    return true;
-  }
+  for (uint8_t attempt = 0; attempt < 2; ++attempt) {
+    modem_.at().exec(10000L, GF("+CMQTTSTART"));
 
-  if (res.raw.indexOf("ERROR") >= 0) {
-    if (modem_.at().waitUrc(UrcType::MqttStop, 3000UL, stopLine)) {
-      delay(500);
-      AtResult retry = modem_.at().exec(8000L, GF("+CMQTTSTART"));
-      if (retry.ok || retry.raw.indexOf("+CMQTTSTART: 0") >= 0) {
+    String urcLine;
+    if (modem_.at().waitUrc(UrcType::MqttStart, 10000UL, urcLine)) {
+      int code = -1;
+      int colon = urcLine.indexOf(':');
+      if (colon >= 0) {
+        String codeStr = urcLine.substring(colon + 1);
+        codeStr.trim();
+        code = codeStr.toInt();
+      }
+      if (code == 0 || code == 23) {
         started_ = true;
         modem_.setState(ModemState::MqttStarted);
         return true;
       }
-      if (retry.raw.indexOf("+CMQTTSTART: 23") >= 0 ||
-          retry.raw.indexOf("already") >= 0) {
-        started_ = true;
-        modem_.setState(ModemState::MqttStarted);
-        return true;
-      }
-      modem_.logValue("[mqtt] start retry raw", retry.raw);
     }
+
     resetService();
-    AtResult retry = modem_.at().exec(8000L, GF("+CMQTTSTART"));
-    if (retry.ok || retry.raw.indexOf("+CMQTTSTART: 0") >= 0) {
-      started_ = true;
-      modem_.setState(ModemState::MqttStarted);
-      return true;
-    }
   }
 
-  modem_.logValue("[mqtt] start raw", res.raw);
+  modem_.logLine("[mqtt] start urc timeout");
   modem_.setLastError(-40, "mqtt start failed");
   return false;
 }
@@ -168,27 +153,29 @@ bool ModemMqtt::connectBroker(const char* host, uint16_t port,
     tlsConfigured_ = true;
   }
 
-  if (user && pass && strlen(user) > 0) {
-    modem_.at().exec(15000L, GF("+CMQTTCONNECT=0,\"tcp://"), host, GF(":"),
-                     port, GF("\",60,1,\""), user, GF("\",\""), pass,
-                     GF("\""));
-  } else {
-    modem_.at().exec(15000L, GF("+CMQTTCONNECT=0,\"tcp://"), host, GF(":"),
-                     port, GF("\",60,1"));
-  }
+  for (uint8_t attempt = 0; attempt < 2; ++attempt) {
+    if (user && pass && strlen(user) > 0) {
+      modem_.at().exec(15000L, GF("+CMQTTCONNECT=0,\"tcp://"), host, GF(":"),
+                       port, GF("\",60,1,\""), user, GF("\",\""), pass,
+                       GF("\""));
+    } else {
+      modem_.at().exec(15000L, GF("+CMQTTCONNECT=0,\"tcp://"), host, GF(":"),
+                       port, GF("\",60,1"));
+    }
 
-  String urcLine;
-  if (modem_.at().waitUrc(UrcType::MqttConnect, 15000UL, urcLine)) {
-    int code = -1;
-    if (ModemParsers::parseMqttResultCode(urcLine, "+CMQTTCONNECT:", code) &&
-        code == 0) {
-      connected_ = true;
-      modem_.setState(ModemState::MqttConnected);
-      return true;
+    String urcLine;
+    if (modem_.at().waitUrc(UrcType::MqttConnect, 15000UL, urcLine)) {
+      int code = -1;
+      if (ModemParsers::parseMqttResultCode(urcLine, "+CMQTTCONNECT:", code) &&
+          code == 0) {
+        connected_ = true;
+        modem_.setState(ModemState::MqttConnected);
+        return true;
+      }
     }
   }
 
-  modem_.logValue("[mqtt] connect raw", urcLine);
+  modem_.logLine("[mqtt] connect urc timeout");
   modem_.setLastError(-42, "mqtt connect failed");
   connected_ = false;
   return false;
@@ -233,20 +220,6 @@ bool ModemMqtt::ensureConnected(const char* host, uint16_t port,
   return false;
 }
 
-bool ModemMqtt::sendPayload(const char* data, size_t length) {
-  if (!data || length == 0) {
-    return false;
-  }
-
-  if (!modem_.at().waitForPrompt(5000L)) {
-    return false;
-  }
-
-  modem_.tapStream().write(reinterpret_cast<const uint8_t*>(data), length);
-  AtResult res = modem_.at().waitOk(5000L);
-  return res.ok;
-}
-
 bool ModemMqtt::publishJson(const char* topic, const char* json, int qos,
                             bool retain) {
   if (!connected_ || !topic || !json) {
@@ -275,19 +248,21 @@ bool ModemMqtt::publishJson(const char* topic, const char* json, int qos,
   int mqttQos = constrain(qos, 0, 2);
   int mqttRetain = retain ? 1 : 0;
 
-  modem_.at().exec(10000L, GF("+CMQTTPUB=0,"), mqttQos, GF(",60,"),
-                   mqttRetain);
+  for (uint8_t attempt = 0; attempt < 2; ++attempt) {
+    modem_.at().exec(10000L, GF("+CMQTTPUB=0,"), mqttQos, GF(",60,"),
+                     mqttRetain);
 
-  String urcLine;
-  if (modem_.at().waitUrc(UrcType::MqttPub, 10000UL, urcLine)) {
-    int code = -1;
-    if (ModemParsers::parseMqttResultCode(urcLine, "+CMQTTPUB:", code) &&
-        code == 0) {
-      return true;
+    String urcLine;
+    if (modem_.at().waitUrc(UrcType::MqttPub, 10000UL, urcLine)) {
+      int code = -1;
+      if (ModemParsers::parseMqttResultCode(urcLine, "+CMQTTPUB:", code) &&
+          code == 0) {
+        return true;
+      }
     }
   }
 
-  modem_.logValue("[mqtt] publish raw", urcLine);
+  modem_.logLine("[mqtt] publish urc timeout");
   return false;
 }
 
@@ -299,7 +274,7 @@ bool ModemMqtt::subscribeTopic(const char* topic, int qos) {
   size_t topicLen = strlen(topic);
   int mqttQos = constrain(qos, 0, 2);
 
-  for (uint8_t attempt = 0; attempt < 3; ++attempt) {
+  for (uint8_t attempt = 0; attempt < 2; ++attempt) {
     if (!modem_.at().execPromptedData(5000L, topic, topicLen,
                                       GF("+CMQTTSUBTOPIC=0,"), topicLen,
                                       GF(","), mqttQos)) {
@@ -319,7 +294,7 @@ bool ModemMqtt::subscribeTopic(const char* topic, int qos) {
       }
     }
 
-    modem_.logValue("[mqtt] sub raw", urcLine);
+    modem_.logLine("[mqtt] sub urc timeout");
     delay(1000);
   }
 
@@ -352,12 +327,21 @@ bool ModemMqtt::pollIncoming(String& topicOut, String& payloadOut) {
     return false;
   }
 
+  if (!modem_.at().waitUrc(UrcType::MqttRxTopic, 5000UL, urcLine)) {
+    return false;
+  }
   if (!modem_.at().readExact(topicLen, topicOut, 5000)) {
+    return false;
+  }
+
+  if (!modem_.at().waitUrc(UrcType::MqttRxPayload, 5000UL, urcLine)) {
     return false;
   }
   if (!modem_.at().readExact(payloadLen, payloadOut, 5000)) {
     return false;
   }
+
+  modem_.at().waitUrc(UrcType::MqttRxEnd, 2000UL, urcLine);
 
   while (modem_.tapStream().available()) {
     char t = static_cast<char>(modem_.tapStream().peek());

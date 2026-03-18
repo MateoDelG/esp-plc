@@ -45,24 +45,26 @@ bool ModemHttp::get(const char* url, uint16_t readLen) {
   }
 
   modem_.logLine("[http] HTTPACTION");
-  if (!modem_.at().exec(10000L, GF("+HTTPACTION=0")).ok) {
-    modem_.at().exec(2000L, GF("+HTTPTERM"));
-    modem_.setLastError(-34, "http action failed");
-    return false;
-  }
-
   String urcLine;
-  if (!modem_.at().waitUrc(UrcType::HttpAction, 30000UL, urcLine)) {
-    modem_.logLine("[http] HTTPACTION URC timeout");
-    modem_.setLastError(-35, "http action urc timeout");
-    modem_.at().exec(2000L, GF("+HTTPTERM"));
-    return false;
-  }
-
-  if (!ModemParsers::parseHttpAction(urcLine, status, length)) {
+  bool ok = false;
+  for (uint8_t attempt = 0; attempt < 2; ++attempt) {
+    if (!modem_.at().exec(10000L, GF("+HTTPACTION=0")).ok) {
+      continue;
+    }
+    if (!modem_.at().waitUrc(UrcType::HttpAction, 30000UL, urcLine)) {
+      continue;
+    }
+    if (ModemParsers::parseHttpAction(urcLine, status, length)) {
+      ok = true;
+      break;
+    }
     modem_.logLine("[http] parse HTTPACTION failed");
     modem_.logValue("[http] raw", urcLine);
-    modem_.setLastError(-36, "http action parse failed");
+  }
+
+  if (!ok) {
+    modem_.logLine("[http] HTTPACTION URC timeout");
+    modem_.setLastError(-35, "http action urc timeout");
     modem_.at().exec(2000L, GF("+HTTPTERM"));
     return false;
   }

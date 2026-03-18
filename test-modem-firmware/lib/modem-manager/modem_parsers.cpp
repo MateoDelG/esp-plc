@@ -182,4 +182,131 @@ bool parseRxStart(const String& line, uint16_t& topicLen, uint16_t& payloadLen) 
   return topicLen > 0 && payloadLen > 0;
 }
 
+bool parseUbidotsLvTopic(const String& topic, String& deviceOut,
+                         String& variableOut) {
+  deviceOut = "";
+  variableOut = "";
+
+  const char* prefix = "/v1.6/devices/";
+  if (!topic.startsWith(prefix)) {
+    return false;
+  }
+
+  String rest = topic.substring(strlen(prefix));
+  int firstSlash = rest.indexOf('/');
+  if (firstSlash <= 0) {
+    return false;
+  }
+  int secondSlash = rest.indexOf('/', firstSlash + 1);
+  if (secondSlash <= firstSlash) {
+    return false;
+  }
+
+  String device = rest.substring(0, firstSlash);
+  String variable = rest.substring(firstSlash + 1, secondSlash);
+  String suffix = rest.substring(secondSlash + 1);
+
+  if (suffix != "lv" || suffix.indexOf('/') >= 0) {
+    return false;
+  }
+  if (device.length() == 0 || variable.length() == 0) {
+    return false;
+  }
+
+  deviceOut = device;
+  variableOut = variable;
+  return true;
+}
+
+bool parseFloatValue(const String& text, float& valueOut) {
+  String trimmed = text;
+  trimmed.trim();
+  if (trimmed.length() == 0) {
+    return false;
+  }
+
+  bool hasDigit = false;
+  bool hasDot = false;
+  for (size_t i = 0; i < trimmed.length(); ++i) {
+    char c = trimmed.charAt(i);
+    if (c == '-' || c == '+') {
+      if (i != 0) {
+        return false;
+      }
+      continue;
+    }
+    if (c == '.') {
+      if (hasDot) {
+        return false;
+      }
+      hasDot = true;
+      continue;
+    }
+    if (c >= '0' && c <= '9') {
+      hasDigit = true;
+      continue;
+    }
+    return false;
+  }
+
+  if (!hasDigit) {
+    return false;
+  }
+
+  valueOut = trimmed.toFloat();
+  return true;
+}
+
+bool sanitizeInfoText(String& text) {
+  if (text.length() == 0) {
+    return false;
+  }
+
+  bool changed = false;
+  String output;
+
+  int start = 0;
+  while (start < text.length()) {
+    int end = text.indexOf('\n', start);
+    if (end < 0) {
+      end = text.length();
+    }
+    String line = text.substring(start, end);
+    line.replace("\r", "");
+    line.trim();
+
+    bool drop = line.startsWith("+MSTK:");
+    if (!drop) {
+      if (line.indexOf("SMS DONE") >= 0) {
+        line.replace("SMS DONE", "");
+        changed = true;
+      }
+      if (line.indexOf("PB DONE") >= 0) {
+        line.replace("PB DONE", "");
+        changed = true;
+      }
+      line.replace("  ", " ");
+      line.trim();
+    }
+    if (drop) {
+      changed = true;
+    } else if (line.length() > 0) {
+      if (output.length() > 0) {
+        output += "\n";
+      }
+      output += line;
+    } else if (line.length() == 0) {
+      changed = true;
+    }
+
+    start = end + 1;
+  }
+
+  if (changed) {
+    text = output;
+  }
+
+  return changed;
+}
+
 }  // namespace ModemParsers

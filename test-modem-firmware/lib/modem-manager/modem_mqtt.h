@@ -28,7 +28,6 @@ class ModemMqtt {
  private:
   bool connectBroker(const char* host, uint16_t port, const char* user,
                      const char* pass);
-  bool sendPayload(const char* data, size_t length);
   void resetService();
 
   ModemManager& modem_;

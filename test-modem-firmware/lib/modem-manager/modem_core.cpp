@@ -116,6 +116,7 @@ String ModemCore::getCpsiInfo() {
   response.replace("\r\nOK\r\n", "");
   response.replace("OK", "");
   response.trim();
+  ModemParsers::sanitizeInfoText(response);
   return response;
 }
 
@@ -138,5 +139,13 @@ ModemInfo ModemCore::getNetworkInfo() {
   info.simStatus = modem_.tinyGsm().getSimStatus();
   info.networkConnected = modem_.tinyGsm().isNetworkConnected();
   info.gprsConnected = modem_.tinyGsm().isGprsConnected();
+
+  ModemParsers::sanitizeInfoText(info.modemName);
+  ModemParsers::sanitizeInfoText(info.modemInfo);
+  ModemParsers::sanitizeInfoText(info.imei);
+  ModemParsers::sanitizeInfoText(info.iccid);
+  ModemParsers::sanitizeInfoText(info.operatorName);
+  ModemParsers::sanitizeInfoText(info.localIp);
+  ModemParsers::sanitizeInfoText(info.cpsi);
   return info;
 }

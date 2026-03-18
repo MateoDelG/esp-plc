@@ -17,6 +17,8 @@ class ModemUbidots {
   bool subscribeVariable(const char* deviceLabel, const char* variableLabel);
   bool pollVariable(const char* deviceLabel, const char* variableLabel,
                     String& valueOut);
+  bool pollVariableFloat(const char* deviceLabel, const char* variableLabel,
+                         float& valueOut);
 
  private:
   ModemManager& modem_;

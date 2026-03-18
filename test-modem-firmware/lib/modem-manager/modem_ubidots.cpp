@@ -1,6 +1,7 @@
 #include "modem_ubidots.h"
 
 #include "modem_manager.h"
+#include "modem_parsers.h"
 
 static const char kUbidotsHost[] = "industrial.api.ubidots.com";
 static const uint16_t kUbidotsPort = 8883;
@@ -71,11 +72,29 @@ bool ModemUbidots::pollVariable(const char* deviceLabel,
     return false;
   }
 
-  if (topic.indexOf(deviceLabel) >= 0 && topic.indexOf(variableLabel) >= 0) {
-    valueOut = payload;
-    modem_.logLine(String("[ubidots] ") + variableLabel + ": " + payload);
-    return true;
+  String device;
+  String variable;
+  if (!ModemParsers::parseUbidotsLvTopic(topic, device, variable)) {
+    return false;
   }
 
-  return false;
+  if (device != deviceLabel || variable != variableLabel) {
+    return false;
+  }
+
+  valueOut = payload;
+  modem_.logLine(String("[ubidots] ") + variableLabel + ": " + payload);
+  return true;
+}
+
+bool ModemUbidots::pollVariableFloat(const char* deviceLabel,
+                                     const char* variableLabel,
+                                     float& valueOut) {
+  valueOut = 0.0f;
+  String payload;
+  if (!pollVariable(deviceLabel, variableLabel, payload)) {
+    return false;
+  }
+
+  return ModemParsers::parseFloatValue(payload, valueOut);
 }

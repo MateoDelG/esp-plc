@@ -23,6 +23,11 @@ bool parseMqttResultCode(const String& response, const char* prefix,
                          int& codeOut);
 bool parseRxStart(const String& line, uint16_t& topicLen, uint16_t& payloadLen);
 
+bool parseUbidotsLvTopic(const String& topic, String& deviceOut,
+                         String& variableOut);
+bool parseFloatValue(const String& text, float& valueOut);
+bool sanitizeInfoText(String& text);
+
 }  // namespace ModemParsers
 
 #endif
