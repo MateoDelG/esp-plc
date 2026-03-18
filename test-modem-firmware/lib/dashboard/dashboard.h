@@ -12,11 +12,14 @@ enum class DashboardSource {
   Modem,
 };
 
+using DashboardCommandHandler = void (*)(const String& cmd);
+
 class Dashboard {
  public:
   void begin(WebServer& server, WebSocketsServer& ws);
   void loop();
   void pushLine(DashboardSource src, const String& line);
+  void setCommandHandler(DashboardCommandHandler handler);
 
  private:
   void handleDashboard();
@@ -25,6 +28,7 @@ class Dashboard {
   WebServer* server_ = nullptr;
   WebSocketsServer* ws_ = nullptr;
   LogBuffer modemBuffer_{100};
+  DashboardCommandHandler commandHandler_ = nullptr;
 };
 
 #endif

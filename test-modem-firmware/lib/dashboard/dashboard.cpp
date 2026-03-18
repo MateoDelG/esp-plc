@@ -89,6 +89,11 @@ static const char kDashboardHtml[] PROGMEM = R"HTML(
       <div class="line muted">Waiting for messages...</div>
     </div>
     <div class="controls">
+      <button id="run-http">Run HTTP</button>
+      <button id="run-mqtt">Run MQTT</button>
+      <button id="run-ubi-pub">Ubidots Publish</button>
+      <button id="run-ubi-sub">Ubidots Subscribe</button>
+      <button id="cancel">Cancel</button>
       <button id="clear">Clear</button>
     </div>
   </main>
@@ -96,6 +101,12 @@ static const char kDashboardHtml[] PROGMEM = R"HTML(
     const consoleEl = document.getElementById('console');
     const statusEl = document.getElementById('status');
     const clearBtn = document.getElementById('clear');
+    const runHttpBtn = document.getElementById('run-http');
+    const runMqttBtn = document.getElementById('run-mqtt');
+    const runUbiPubBtn = document.getElementById('run-ubi-pub');
+    const runUbiSubBtn = document.getElementById('run-ubi-sub');
+    const cancelBtn = document.getElementById('cancel');
+    const testButtons = [runHttpBtn, runMqttBtn, runUbiPubBtn, runUbiSubBtn];
 
     function appendLine(text, cls) {
       const line = document.createElement('div');
@@ -127,7 +138,48 @@ static const char kDashboardHtml[] PROGMEM = R"HTML(
       } else {
         appendLine(text, '');
       }
+
+      if (text.includes('Test state: running')) {
+        setRunning(true);
+      } else if (text.includes('Test state: idle')) {
+        setRunning(false);
+      }
     };
+
+    function sendCommand(cmd) {
+      if (ws.readyState === WebSocket.OPEN) {
+        ws.send(cmd);
+      } else {
+        appendLine(`Command skipped (${cmd}), socket offline`, 'muted');
+      }
+    }
+
+    function setRunning(running) {
+      testButtons.forEach((btn) => {
+        btn.disabled = running;
+      });
+      cancelBtn.disabled = !running;
+    }
+
+    setRunning(false);
+
+    runHttpBtn.addEventListener('click', () => {
+      setRunning(true);
+      sendCommand('run_http');
+    });
+    runMqttBtn.addEventListener('click', () => {
+      setRunning(true);
+      sendCommand('run_mqtt');
+    });
+    runUbiPubBtn.addEventListener('click', () => {
+      setRunning(true);
+      sendCommand('run_ubidots_pub');
+    });
+    runUbiSubBtn.addEventListener('click', () => {
+      setRunning(true);
+      sendCommand('run_ubidots_sub');
+    });
+    cancelBtn.addEventListener('click', () => sendCommand('cancel_test'));
   </script>
 </body>
 </html>
@@ -149,6 +201,19 @@ void Dashboard::begin(WebServer& server, WebSocketsServer& ws) {
       for (size_t i = 0; i < count; ++i) {
         String line = modemBuffer_.get(i);
         ws_->sendTXT(client, line);
+      }
+      return;
+    }
+
+    if (type == WStype_TEXT && commandHandler_ && payload && length > 0) {
+      String command;
+      command.reserve(length + 4);
+      for (size_t i = 0; i < length; ++i) {
+        command += static_cast<char>(payload[i]);
+      }
+      command.trim();
+      if (command.length() > 0) {
+        commandHandler_(command);
       }
     }
   });
@@ -172,6 +237,10 @@ void Dashboard::pushLine(DashboardSource src, const String& line) {
     modemBuffer_.push(payload);
   }
   ws_->broadcastTXT(payload);
+}
+
+void Dashboard::setCommandHandler(DashboardCommandHandler handler) {
+  commandHandler_ = handler;
 }
 
 void Dashboard::handleDashboard() {
