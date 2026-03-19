@@ -1,8 +1,8 @@
 # modem-manager
 
 Libreria para ESP32 + SIMCom A7670SA-FASE (Arduino) basada en TinyGSM.
-Se enfoca en un flujo robusto con URCs tardias y soporte para HTTP, MQTT TLS y
-Ubidots, manteniendo logs detallados del trafico AT.
+Se enfoca en un flujo robusto con URCs tardias y soporte para HTTP y MQTT TLS
+generico, manteniendo logs detallados del trafico AT.
 
 ## Proposito
 
@@ -10,7 +10,7 @@ Ubidots, manteniendo logs detallados del trafico AT.
 - Registrar red LTE, abrir sesion de datos y validar IP.
 - Ejecutar HTTP con URCs tardias.
 - Ejecutar MQTT TLS con URCs tardias.
-- Integracion directa con Ubidots (publish + subscribe).
+- Soportar cualquier broker MQTT (Ubidots, HiveMQ, etc).
 
 ## Arquitectura de modulos
 
@@ -30,8 +30,6 @@ Ubidots, manteniendo logs detallados del trafico AT.
   - HTTPINIT, HTTPACTION, HTTPREAD.
 - `modem_mqtt`
   - CMQTTSTART/ACCQ/CONNECT/PUB/SUB/DISCONNECT.
-- `modem_ubidots`
-  - Helpers Ubidots y parseo de topics/payloads.
 - `modem_tap_stream`
   - Tap de trafico AT para logs.
 - `modem_types`
@@ -70,13 +68,7 @@ Ubidots, manteniendo logs detallados del trafico AT.
 7. `CMQTTSUBTOPIC` + `CMQTTSUB` (URC `+CMQTTSUB: 0,0`)
 8. `CMQTTDISC/REL/STOP`
 
-## Ubidots
-
-- Broker: `industrial.api.ubidots.com:8883`
-- TLS
-- User/Pass: token (por compatibilidad en SIMCom)
-
-### Ejemplo publish (Ubidots)
+## Ejemplo MQTT (Ubidots via API generica)
 
 ```cpp
 ModemManager modem(modemConfig);
@@ -84,18 +76,26 @@ ModemManager modem(modemConfig);
 if (!modem.begin()) return;
 if (!modem.ensureDataSession()) return;
 
-modem.ubidots().publishValue("TOKEN", "device", "temperature", 24.5f);
-```
+const char* host = "industrial.api.ubidots.com";
+const uint16_t port = 8883;
+const char* token = "TOKEN";
+const char* clientId = "esp001";
 
-### Ejemplo subscribe (Ubidots)
+if (!modem.mqtt().connect(host, port, clientId, token, token, true)) return;
 
-```cpp
-if (!modem.ubidots().connect("TOKEN")) return;
-if (!modem.ubidots().subscribeVariable("device", "test-out")) return;
+String topic = "/v1.6/devices/device";
+String payload = "{\"temperature\":24.5}";
+modem.mqtt().publish(topic.c_str(), payload.c_str(), 1, false);
+
+String subTopic = "/v1.6/devices/device/test-out/lv";
+modem.mqtt().subscribe(subTopic.c_str(), 1);
 
 for (;;) {
+  String rxTopic;
   String value;
-  modem.ubidots().pollVariable("device", "test-out", value);
+  if (modem.mqtt().pollIncoming(rxTopic, value) && rxTopic == subTopic) {
+    Serial.println(value);
+  }
   delay(300);
 }
 ```

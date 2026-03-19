@@ -3,6 +3,7 @@
 #define MODEM_AT_H
 
 #include <Arduino.h>
+#include <FS.h>
 
 #include "modem_manager_config.h"
 
@@ -43,6 +44,7 @@ class AtClient {
   String readRaw(uint32_t timeoutMs);
 
   bool readExact(size_t length, String& out, uint32_t timeoutMs);
+  bool readExactToFile(size_t length, File& file, uint32_t timeoutMs);
 
  private:
   TinyGsm& modem_;

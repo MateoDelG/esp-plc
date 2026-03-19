@@ -124,6 +124,8 @@ void parseHttpUrl(const char* url, String& hostOut, String& pathOut) {
 
   if (u.startsWith("http://")) {
     u.remove(0, 7);
+  } else if (u.startsWith("https://")) {
+    u.remove(0, 8);
   }
 
   int slash = u.indexOf('/');
@@ -137,6 +139,30 @@ void parseHttpUrl(const char* url, String& hostOut, String& pathOut) {
       pathOut = "/";
     }
   }
+}
+
+bool parseHttpReadHeader(const String& line, int& dataLen) {
+  dataLen = 0;
+  if (!line.startsWith("+HTTPREAD:")) {
+    return false;
+  }
+
+  String rest = line.substring(10);
+  rest.trim();
+  if (rest.startsWith("DATA")) {
+    int comma = rest.indexOf(',');
+    if (comma < 0) {
+      return false;
+    }
+    String lenStr = rest.substring(comma + 1);
+    lenStr.trim();
+    dataLen = lenStr.toInt();
+  } else {
+    rest.trim();
+    dataLen = rest.toInt();
+  }
+
+  return dataLen >= 0;
 }
 
 bool parseMqttResultCode(const String& response, const char* prefix,
@@ -180,42 +206,6 @@ bool parseRxStart(const String& line, uint16_t& topicLen, uint16_t& payloadLen) 
   topicLen = static_cast<uint16_t>(topicStr.toInt());
   payloadLen = static_cast<uint16_t>(payloadStr.toInt());
   return topicLen > 0 && payloadLen > 0;
-}
-
-bool parseUbidotsLvTopic(const String& topic, String& deviceOut,
-                         String& variableOut) {
-  deviceOut = "";
-  variableOut = "";
-
-  const char* prefix = "/v1.6/devices/";
-  if (!topic.startsWith(prefix)) {
-    return false;
-  }
-
-  String rest = topic.substring(strlen(prefix));
-  int firstSlash = rest.indexOf('/');
-  if (firstSlash <= 0) {
-    return false;
-  }
-  int secondSlash = rest.indexOf('/', firstSlash + 1);
-  if (secondSlash <= firstSlash) {
-    return false;
-  }
-
-  String device = rest.substring(0, firstSlash);
-  String variable = rest.substring(firstSlash + 1, secondSlash);
-  String suffix = rest.substring(secondSlash + 1);
-
-  if (suffix != "lv" || suffix.indexOf('/') >= 0) {
-    return false;
-  }
-  if (device.length() == 0 || variable.length() == 0) {
-    return false;
-  }
-
-  deviceOut = device;
-  variableOut = variable;
-  return true;
 }
 
 bool parseFloatValue(const String& text, float& valueOut) {

@@ -77,6 +77,15 @@ static const char kDashboardHtml[] PROGMEM = R"HTML(
       cursor: pointer;
     }
     button:hover { background: #232a31; }
+    input {
+      background: #11161b;
+      border: 1px solid var(--border);
+      color: var(--text);
+      padding: 8px 12px;
+      border-radius: 6px;
+      min-width: 200px;
+      flex: 1;
+    }
   </style>
 </head>
 <body>
@@ -89,7 +98,12 @@ static const char kDashboardHtml[] PROGMEM = R"HTML(
       <div class="line muted">Waiting for messages...</div>
     </div>
     <div class="controls">
+      <input id="at-command" placeholder="AT+..." />
+      <button id="send-at">Send AT</button>
       <button id="run-http">Run HTTP</button>
+      <button id="run-http-download">Download OTA</button>
+      <button id="run-ota-install">Install OTA</button>
+      <button id="run-sd-list">List SD</button>
       <button id="run-mqtt">Run MQTT</button>
       <button id="run-ubi-pub">Ubidots Publish</button>
       <button id="run-ubi-sub">Ubidots Subscribe</button>
@@ -102,11 +116,24 @@ static const char kDashboardHtml[] PROGMEM = R"HTML(
     const statusEl = document.getElementById('status');
     const clearBtn = document.getElementById('clear');
     const runHttpBtn = document.getElementById('run-http');
+    const runHttpDownloadBtn = document.getElementById('run-http-download');
+    const runOtaInstallBtn = document.getElementById('run-ota-install');
+    const runSdListBtn = document.getElementById('run-sd-list');
     const runMqttBtn = document.getElementById('run-mqtt');
     const runUbiPubBtn = document.getElementById('run-ubi-pub');
     const runUbiSubBtn = document.getElementById('run-ubi-sub');
     const cancelBtn = document.getElementById('cancel');
-    const testButtons = [runHttpBtn, runMqttBtn, runUbiPubBtn, runUbiSubBtn];
+    const atCommandInput = document.getElementById('at-command');
+    const sendAtBtn = document.getElementById('send-at');
+    const testButtons = [
+      runHttpBtn,
+      runHttpDownloadBtn,
+      runOtaInstallBtn,
+      runSdListBtn,
+      runMqttBtn,
+      runUbiPubBtn,
+      runUbiSubBtn,
+    ];
 
     function appendLine(text, cls) {
       const line = document.createElement('div');
@@ -163,9 +190,36 @@ static const char kDashboardHtml[] PROGMEM = R"HTML(
 
     setRunning(false);
 
+    function sendAtCommand() {
+      const cmd = (atCommandInput.value || '').trim();
+      if (!cmd) {
+        return;
+      }
+      sendCommand(`at:${cmd}`);
+      atCommandInput.value = '';
+    }
+
+    sendAtBtn.addEventListener('click', sendAtCommand);
+    atCommandInput.addEventListener('keydown', (event) => {
+      if (event.key === 'Enter') {
+        sendAtCommand();
+      }
+    });
+
     runHttpBtn.addEventListener('click', () => {
       setRunning(true);
       sendCommand('run_http');
+    });
+    runHttpDownloadBtn.addEventListener('click', () => {
+      setRunning(true);
+      sendCommand('run_http_download');
+    });
+    runOtaInstallBtn.addEventListener('click', () => {
+      setRunning(true);
+      sendCommand('run_ota_install');
+    });
+    runSdListBtn.addEventListener('click', () => {
+      sendCommand('run_sd_list');
     });
     runMqttBtn.addEventListener('click', () => {
       setRunning(true);
@@ -197,6 +251,11 @@ void Dashboard::begin(WebServer& server, WebSocketsServer& ws) {
     (void)payload;
     (void)length;
     if (type == WStype_CONNECTED) {
+      size_t usbCount = usbBuffer_.size();
+      for (size_t i = 0; i < usbCount; ++i) {
+        String line = usbBuffer_.get(i);
+        ws_->sendTXT(client, line);
+      }
       size_t count = modemBuffer_.size();
       for (size_t i = 0; i < count; ++i) {
         String line = modemBuffer_.get(i);
@@ -226,17 +285,18 @@ void Dashboard::loop() {
 }
 
 void Dashboard::pushLine(DashboardSource src, const String& line) {
-  if (!ws_) {
-    return;
-  }
   String payload;
   payload.reserve(line.length() + 12);
   payload += sourceLabel(src);
   payload += line;
   if (src == DashboardSource::Modem) {
     modemBuffer_.push(payload);
+  } else if (src == DashboardSource::Usb) {
+    usbBuffer_.push(payload);
   }
-  ws_->broadcastTXT(payload);
+  if (ws_) {
+    ws_->broadcastTXT(payload);
+  }
 }
 
 void Dashboard::setCommandHandler(DashboardCommandHandler handler) {

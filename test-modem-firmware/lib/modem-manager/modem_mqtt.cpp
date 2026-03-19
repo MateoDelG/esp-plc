@@ -126,8 +126,31 @@ bool ModemMqtt::acquire(const char* clientId) {
   return false;
 }
 
+bool ModemMqtt::connect(const char* host, uint16_t port, const char* clientId,
+                        const char* user, const char* pass, bool useTls) {
+  if (!host || strlen(host) == 0 || !clientId || strlen(clientId) == 0) {
+    return false;
+  }
+  if (connected_) {
+    return true;
+  }
+
+  if (!ensureStarted()) {
+    modem_.logLine("[mqtt] start failed");
+    return false;
+  }
+
+  if (!acquire(clientId)) {
+    modem_.logLine("[mqtt] acquire failed");
+    return false;
+  }
+
+  return connectBroker(host, port, user, pass, useTls);
+}
+
 bool ModemMqtt::connectBroker(const char* host, uint16_t port,
-                              const char* user, const char* pass) {
+                              const char* user, const char* pass,
+                              bool useTls) {
   if (!host || strlen(host) == 0) {
     return false;
   }
@@ -145,7 +168,7 @@ bool ModemMqtt::connectBroker(const char* host, uint16_t port,
     return false;
   }
 
-  if (!tlsConfigured_) {
+  if (useTls && !tlsConfigured_) {
     modem_.at().exec(3000L, GF("+CSSLCFG=\"sslversion\",0,4"));
     modem_.at().exec(3000L, GF("+CSSLCFG=\"authmode\",0,0"));
     modem_.at().exec(3000L, GF("+CSSLCFG=\"enableSNI\",0,1"));
@@ -184,7 +207,7 @@ bool ModemMqtt::connectBroker(const char* host, uint16_t port,
 bool ModemMqtt::ensureConnected(const char* host, uint16_t port,
                                 const char* clientId, uint8_t retries,
                                 uint32_t retryDelayMs, const char* user,
-                                const char* pass) {
+                                const char* pass, bool useTls) {
   if (!host || strlen(host) == 0) {
     return false;
   }
@@ -206,7 +229,7 @@ bool ModemMqtt::ensureConnected(const char* host, uint16_t port,
     modem_.logLine(String("[mqtt] broker connect attempt ") +
                    (attempt + 1) + "/" + retries);
 
-    if (connectBroker(host, port, user, pass)) {
+    if (connectBroker(host, port, user, pass, useTls)) {
       return true;
     }
 
@@ -220,14 +243,14 @@ bool ModemMqtt::ensureConnected(const char* host, uint16_t port,
   return false;
 }
 
-bool ModemMqtt::publishJson(const char* topic, const char* json, int qos,
-                            bool retain) {
-  if (!connected_ || !topic || !json) {
+bool ModemMqtt::publish(const char* topic, const char* payload, int qos,
+                        bool retain) {
+  if (!connected_ || !topic || !payload) {
     return false;
   }
 
   size_t topicLen = strlen(topic);
-  size_t payloadLen = strlen(json);
+  size_t payloadLen = strlen(payload);
 
   if (!modem_.at().execPromptedData(5000L, topic, topicLen,
                                     GF("+CMQTTTOPIC=0,"), topicLen)) {
@@ -237,7 +260,7 @@ bool ModemMqtt::publishJson(const char* topic, const char* json, int qos,
 
   delay(30);
 
-  if (!modem_.at().execPromptedData(5000L, json, payloadLen,
+  if (!modem_.at().execPromptedData(5000L, payload, payloadLen,
                                     GF("+CMQTTPAYLOAD=0,"), payloadLen)) {
     modem_.logLine("[mqtt] message payload failed");
     return false;
@@ -266,7 +289,23 @@ bool ModemMqtt::publishJson(const char* topic, const char* json, int qos,
   return false;
 }
 
-bool ModemMqtt::subscribeTopic(const char* topic, int qos) {
+bool ModemMqtt::publishText(const char* topic, const char* text, int qos,
+                            bool retain) {
+  return publish(topic, text, qos, retain);
+}
+
+bool ModemMqtt::publishJson(const char* topic, const char* json, int qos,
+                            bool retain) {
+  return publish(topic, json, qos, retain);
+}
+
+bool ModemMqtt::publishFloat(const char* topic, float value, int qos,
+                             bool retain, uint8_t decimals) {
+  String payload(value, static_cast<unsigned int>(decimals));
+  return publish(topic, payload.c_str(), qos, retain);
+}
+
+bool ModemMqtt::subscribe(const char* topic, int qos) {
   if (!connected_ || !topic) {
     return false;
   }
@@ -299,6 +338,10 @@ bool ModemMqtt::subscribeTopic(const char* topic, int qos) {
   }
 
   return false;
+}
+
+bool ModemMqtt::subscribeTopic(const char* topic, int qos) {
+  return subscribe(topic, qos);
 }
 
 bool ModemMqtt::pollIncoming(String& topicOut, String& payloadOut) {

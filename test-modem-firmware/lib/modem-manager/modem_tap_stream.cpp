@@ -10,6 +10,28 @@ void ModemTapStream::setCallback(LineCallback callback) {
   callback_ = callback;
 }
 
+void ModemTapStream::setRxLoggingEnabled(bool enabled) {
+  if (rxLoggingEnabled_ == enabled) {
+    return;
+  }
+  rxLoggingEnabled_ = enabled;
+  if (!rxLoggingEnabled_) {
+    rxBuffer_ = "";
+    rxOverflowed_ = false;
+  }
+}
+
+void ModemTapStream::setTxLoggingEnabled(bool enabled) {
+  if (txLoggingEnabled_ == enabled) {
+    return;
+  }
+  txLoggingEnabled_ = enabled;
+  if (!txLoggingEnabled_) {
+    txBuffer_ = "";
+    txOverflowed_ = false;
+  }
+}
+
 int ModemTapStream::available() { return serial_.available(); }
 
 int ModemTapStream::read() {
@@ -38,6 +60,13 @@ size_t ModemTapStream::write(const uint8_t* buffer, size_t size) {
 
 void ModemTapStream::handleByte(bool isTx, char c) {
   if (c == '\r') {
+    return;
+  }
+
+  if (isTx && !txLoggingEnabled_) {
+    return;
+  }
+  if (!isTx && !rxLoggingEnabled_) {
     return;
   }
 

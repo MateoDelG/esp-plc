@@ -2,9 +2,13 @@
 #include <WiFi.h>
 #include <WebServer.h>
 #include <WebSocketsServer.h>
+#include <SPI.h>
+#include <SD.h>
+#include <Preferences.h>
 
 #include "dashboard.h"
 #include "modem_manager.h"
+#include "ota_manager.h"
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/event_groups.h"
@@ -16,6 +20,25 @@ static const char kPass[] = "comcel";
 static const int8_t kPinTx = 26;
 static const int8_t kPinRx = 27;
 static const int8_t kPwrKey = 4;
+
+static const int8_t kSdMiso = 2;
+static const int8_t kSdMosi = 15;
+static const int8_t kSdSclk = 14;
+static const int8_t kSdCs = 13;
+
+static const char kHttpTestUrl[] = "http://example.com/";
+static const char kHttpDownloadUrl[] =
+    "https://raw.githubusercontent.com/MateoDelG/tests-ota-esp/master/firmware.bin";
+static const char kHttpDownloadPath[] = "/firmware.bin";
+static const uint16_t kHttpDownloadChunkSize = 512; //512
+
+static const char kMqttHost[] =
+    "b282c2526e92497b9e5d5741f7483e22.s1.eu.hivemq.cloud";
+static const uint16_t kMqttPort = 8883;
+static const char kMqttClientId[] = "esp001";
+static const char kMqttUser[] = "testesp001";
+static const char kMqttPass[] = "Testesp001+";
+static const char kMqttTopic[] = "esp001";
 
 static WebServer server(80);
 static WebSocketsServer ws(81);
@@ -38,9 +61,27 @@ static ModemConfig modemConfig = {
   },
 };
 
+static void logUsb(const String& line);
+
 static ModemManager modem(modemConfig);
+static OtaManager ota(logUsb);
 
 static String usbLine;
+
+static Preferences otaPrefs;
+static bool otaSdReady = true;
+
+static const char kOtaPrefNs[] = "ota";
+static const char kOtaPrefState[] = "download_state";
+static const char kOtaPrefExpected[] = "expected_size";
+static const char kOtaPrefWritten[] = "written_bytes";
+
+enum OtaDownloadState : uint8_t {
+  OtaStateIdle = 0,
+  OtaStateDownloading = 1,
+  OtaStateValidating = 2,
+  OtaStateReady = 3,
+};
 
 static EventGroupHandle_t modemEvents;
 static const EventBits_t BIT_MODEM_READY = 1 << 0;
@@ -51,6 +92,8 @@ static const EventBits_t BIT_CANCEL_TEST = 1 << 3;
 enum class TestType : uint8_t {
   None = 0,
   Http,
+  HttpDownload,
+  OtaInstall,
   Mqtt,
   UbidotsPublish,
   UbidotsSubscribe,
@@ -63,6 +106,10 @@ static volatile bool cancelRequested = false;
 static const char kUbiToken[] = "BBUS-orL2zH4XNEKC0880tXUcuxdTWpX5R8";
 static const char kUbiDevice[] = "aqcuicola-001";
 static const char kUbiVariable[] = "test-out";
+static const char kUbiHost[] = "industrial.api.ubidots.com";
+static const uint16_t kUbiPort = 8883;
+static const char kUbiTopicPub[] = "/v1.6/devices/aqcuicola-001";
+static const char kUbiTopicSub[] = "/v1.6/devices/aqcuicola-001/test-out/lv";
 
 static void setupWifi() {
   const char* ssid = "Delga";
@@ -101,17 +148,202 @@ static void logUsb(const String& line) {
   dashboard.pushLine(DashboardSource::Usb, line);
 }
 
+static void logUsbSink(bool isTx, const String& line) {
+  (void)isTx;
+  logUsb(line);
+}
+
+static bool sdQuickWriteProbe(const char* path) {
+  logUsb("[sd] quick probe start");
+  SD.remove(path);
+
+  File file = SD.open(path, FILE_WRITE);
+  if (!file) {
+    logUsb("[sd] quick probe open fail");
+    return false;
+  }
+  logUsb("[sd] quick probe open ok");
+
+  size_t written = file.write(reinterpret_cast<const uint8_t*>("test"), 4);
+  if (written != 4) {
+    logUsb("[sd] quick probe write fail");
+    file.close();
+    SD.remove(path);
+    return false;
+  }
+  logUsb("[sd] quick probe write ok");
+
+  file.flush();
+  logUsb("[sd] quick probe flush ok");
+  file.close();
+  logUsb("[sd] quick probe close ok");
+
+  bool cleanupOk = SD.remove(path);
+  logUsb(String("[sd] quick probe cleanup ") + (cleanupOk ? "ok" : "fail"));
+  return true;
+}
+
+static bool sdStrictReadbackProbe(const char* path) {
+  File file = SD.open(path, FILE_READ);
+  if (!file) {
+    logUsb("[sd] strict probe reopen read fail");
+    return false;
+  }
+
+  size_t size = file.size();
+  logUsb(String("[sd] strict probe size: ") + size);
+  if (size == 0) {
+    file.close();
+    return false;
+  }
+
+  char buffer[5] = {0};
+  size_t readCount = file.readBytes(buffer, 4);
+  bool readbackOk = (readCount == 4 && strncmp(buffer, "test", 4) == 0);
+  logUsb(String("[sd] strict probe readback ") + (readbackOk ? "ok" : "fail"));
+  file.close();
+  return readbackOk;
+}
+
+static void purgeOtaArtifacts() {
+  logUsb("[sd] purge ota artifacts");
+  const char* kArtifacts[] = {
+      "/fw.part",
+      "/firmware.bin.tmp",
+      "/firmware.bak",
+      "/sdtest.tmp",
+  };
+
+  for (const char* path : kArtifacts) {
+    if (SD.remove(path)) {
+      logUsb(String("[sd] remove ") + path);
+    }
+  }
+
+  logUsb("[sd] purge ota artifacts done");
+}
+
+static void setOtaRecoveryPending(bool value) {
+  otaPrefs.begin("ota", false);
+  otaPrefs.putBool("recovery_pending", value);
+  otaPrefs.end();
+}
+
+static bool isOtaRecoveryPending() {
+  otaPrefs.begin("ota", true);
+  bool value = otaPrefs.getBool("recovery_pending", false);
+  otaPrefs.end();
+  return value;
+}
+
+static void setOtaDownloadState(uint8_t state, uint32_t expected,
+                                uint32_t written) {
+  otaPrefs.begin(kOtaPrefNs, false);
+  otaPrefs.putUChar(kOtaPrefState, state);
+  otaPrefs.putUInt(kOtaPrefExpected, expected);
+  otaPrefs.putUInt(kOtaPrefWritten, written);
+  otaPrefs.end();
+}
+
+static uint8_t getOtaDownloadState(uint32_t* expected,
+                                   uint32_t* written) {
+  otaPrefs.begin(kOtaPrefNs, true);
+  uint8_t state = otaPrefs.getUChar(kOtaPrefState, OtaStateIdle);
+  if (expected) {
+    *expected = otaPrefs.getUInt(kOtaPrefExpected, 0);
+  }
+  if (written) {
+    *written = otaPrefs.getUInt(kOtaPrefWritten, 0);
+  }
+  otaPrefs.end();
+  return state;
+}
+
+static bool recoverSd();
+
+static void listSdRoot() {
+  if (!sdQuickWriteProbe("/sdtest.tmp")) {
+    if (!recoverSd()) {
+      logUsb("SD not ready");
+      return;
+    }
+  }
+
+  File root = SD.open("/");
+  if (!root) {
+    logUsb("SD open root failed");
+    return;
+  }
+
+  logUsb("SD list:");
+  File entry = root.openNextFile();
+  if (!entry) {
+    logUsb("(empty)");
+  }
+  while (entry) {
+    String line = entry.name();
+    if (entry.isDirectory()) {
+      line += "/";
+    } else {
+      line += " ";
+      line += String(entry.size());
+      line += " bytes";
+    }
+    logUsb(line);
+    entry.close();
+    entry = root.openNextFile();
+  }
+  root.close();
+}
+
+static bool recoverSd() {
+  logUsb("[sd] recovery start");
+  SD.end();
+  logUsb("[sd] recovery spi end");
+  SPI.end();
+  delay(150);
+  SPI.begin(kSdSclk, kSdMiso, kSdMosi, kSdCs);
+  logUsb("[sd] recovery spi begin");
+  delay(100);
+  if (SD.begin(kSdCs, SPI, 4000000)) {
+    logUsb("[sd] recovery sd begin ok");
+    delay(100);
+    purgeOtaArtifacts();
+    if (!sdQuickWriteProbe("/sdtest.tmp")) {
+      logUsb("[sd] recovery probe retry");
+      if (sdQuickWriteProbe("/sdtest.tmp")) {
+        logUsb("[sd] recovery ok");
+        return true;
+      }
+    } else {
+      logUsb("[sd] recovery ok");
+      return true;
+    }
+  } else {
+    logUsb("[sd] recovery sd begin fail");
+  }
+  logUsb("[sd] recovery failed");
+  return false;
+}
+
 static void logModem(const String& line) {
   dashboard.pushLine(DashboardSource::Modem, line);
 }
 
 static void publishUbidotsTest() {
   logUsb("Ubidots publish...");
-  if (modem.ubidots().publishValue(kUbiToken, kUbiDevice, "test-in", 25.4f)) {
+  String topic = kUbiTopicPub;
+  String payload = String("{\"") + "test-in" + "\":" + String(25.4f, 2) +
+                   "}";
+  if (modem.mqtt().connect(kUbiHost, kUbiPort, kMqttClientId, kUbiToken,
+                           kUbiToken,
+                           true) &&
+      modem.mqtt().publish(topic.c_str(), payload.c_str(), 1, false)) {
     logUsb("Ubidots OK");
   } else {
     logUsb("Ubidots failed");
   }
+  modem.mqtt().disconnect();
 }
 
 static void setTestState(bool running) {
@@ -138,9 +370,53 @@ static void handleDashboardCommand(const String& cmd) {
     return;
   }
 
+  if (cmd.startsWith("at:") || cmd.startsWith("AT") || cmd.startsWith("at")) {
+    String raw = cmd;
+    if (raw.startsWith("at:")) {
+      raw.remove(0, 3);
+    }
+    raw.trim();
+
+    bool hadAtPrefix = false;
+    if (raw.startsWith("AT")) {
+      raw.remove(0, 2);
+      raw.trim();
+      hadAtPrefix = true;
+    }
+
+    if (!hadAtPrefix && raw.length() > 0 && !raw.startsWith("+")) {
+      logUsb("AT command must start with AT or +");
+      return;
+    }
+    if (raw.length() > 200) {
+      logUsb("AT command too long");
+      return;
+    }
+
+    String display = hadAtPrefix ? String("AT") + raw : String("AT") + raw;
+    logUsb(String("AT> ") + display);
+    AtResult res = modem.at().exec(5000L, raw.c_str());
+    if (res.raw.length() > 0) {
+      logUsb(String("AT< ") + res.raw);
+    }
+    if (!res.ok || res.error) {
+      logUsb("AT error");
+    }
+    return;
+  }
+
   if (cmd == "run_http") {
     logUsb("Dashboard: run HTTP test");
     requestTest(TestType::Http);
+  } else if (cmd == "run_http_download") {
+    logUsb("Dashboard: download OTA file");
+    requestTest(TestType::HttpDownload);
+  } else if (cmd == "run_ota_install") {
+    logUsb("Dashboard: install OTA from SD");
+    requestTest(TestType::OtaInstall);
+  } else if (cmd == "run_sd_list") {
+    logUsb("Dashboard: list SD");
+    listSdRoot();
   } else if (cmd == "run_mqtt") {
     logUsb("Dashboard: run MQTT test");
     requestTest(TestType::Mqtt);
@@ -158,14 +434,6 @@ static void handleDashboardCommand(const String& cmd) {
   } else {
     logUsb(String("Dashboard: unknown command ") + cmd);
   }
-}
-
-static void ubidotsTask(void* pv) {
-  (void)pv;
-
-  xEventGroupWaitBits(modemEvents, BIT_DATA_READY, pdFALSE, pdTRUE,
-                      portMAX_DELAY);
-  vTaskDelete(nullptr);
 }
 
 static void readSerialLines(Stream& stream, String& buffer,
@@ -278,12 +546,39 @@ static void testRunnerTask(void* pv) {
 
     if (currentTest == TestType::Http) {
       logUsb("HTTP test (example.com)...");
-      if (!cancelRequested && modem.http().get("http://example.com/", 64)) {
+      if (!cancelRequested && modem.http().get(kHttpTestUrl, 64)) {
         logUsb("HTTP OK");
       } else if (cancelRequested) {
         logUsb("HTTP test cancelled");
       } else {
         logUsb("HTTP failed");
+      }
+    } else if (currentTest == TestType::HttpDownload) {
+      logUsb("HTTP download (OTA txt)...");
+      if (cancelRequested) {
+        logUsb("HTTP download cancelled");
+      } else if (modem.http().downloadToFile(kHttpDownloadUrl,
+                                             kHttpDownloadPath,
+                                             kHttpDownloadChunkSize,
+                                             logUsbSink, recoverSd)) {
+        logUsb("HTTP download OK");
+      } else {
+        logUsb("HTTP download failed");
+      }
+    } else if (currentTest == TestType::OtaInstall) {
+      logUsb("OTA install from SD...");
+      if (cancelRequested) {
+        logUsb("OTA install cancelled");
+      } else if (!sdQuickWriteProbe("/sdtest.tmp")) {
+        logUsb("[sd] quick probe failed");
+        if (!recoverSd()) {
+          logUsb("SD not ready");
+          continue;
+        }
+      } else if (ota.installFromSd(kHttpDownloadPath)) {
+        logUsb("OTA install OK");
+      } else {
+        logUsb("OTA install failed");
       }
     } else if (currentTest == TestType::Mqtt) {
       String payload =
@@ -291,12 +586,11 @@ static void testRunnerTask(void* pv) {
           millis() + "}";
       logUsb("MQTT connect...");
       if (!cancelRequested &&
-          modem.mqtt().ensureConnected(
-              "b282c2526e92497b9e5d5741f7483e22.s1.eu.hivemq.cloud", 8883,
-              "esp001", 3, 2000, "testesp001", "Testesp001+")) {
+          modem.mqtt().ensureConnected(kMqttHost, kMqttPort, kMqttClientId, 3,
+                                       2000, kMqttUser, kMqttPass)) {
         logUsb("MQTT connected");
-        if (!cancelRequested &&
-            modem.mqtt().publishJson("esp001", payload.c_str(), 1, false)) {
+        if (!cancelRequested && modem.mqtt().publishJson(
+                                    kMqttTopic, payload.c_str(), 1, false)) {
           logUsb("MQTT publish OK");
         } else if (cancelRequested) {
           logUsb("MQTT publish cancelled");
@@ -312,20 +606,29 @@ static void testRunnerTask(void* pv) {
     } else if (currentTest == TestType::UbidotsPublish) {
       logUsb("Ubidots publish...");
       float value = static_cast<float>(random(0, 101));
-      if (!cancelRequested &&
-          modem.ubidots().publishValue(kUbiToken, kUbiDevice, "test-in", value,
-                                       true)) {
+      String topic = kUbiTopicPub;
+      String payload =
+          String("{\"") + "test-in" + "\":" + String(value, 2) + "}";
+      bool connected =
+          modem.mqtt().connect(kUbiHost, kUbiPort, kMqttClientId, kUbiToken,
+                               kUbiToken, true);
+      if (!cancelRequested && connected &&
+          modem.mqtt().publish(topic.c_str(), payload.c_str(), 1, false)) {
         logUsb("Ubidots OK");
       } else if (cancelRequested) {
         logUsb("Ubidots publish cancelled");
       } else {
         logUsb("Ubidots failed");
       }
+      modem.mqtt().disconnect();
     } else if (currentTest == TestType::UbidotsSubscribe) {
       logUsb("Ubidots subscribe...");
-      if (!cancelRequested && modem.ubidots().connect(kUbiToken, "esp001")) {
-        if (!cancelRequested &&
-            modem.ubidots().subscribeVariable(kUbiDevice, kUbiVariable)) {
+      String topic = kUbiTopicSub;
+      bool connected =
+          modem.mqtt().connect(kUbiHost, kUbiPort, kMqttClientId, kUbiToken,
+                               kUbiToken, true);
+      if (!cancelRequested && connected) {
+        if (!cancelRequested && modem.mqtt().subscribe(topic.c_str(), 1)) {
           logUsb("Ubidots subscribe ok");
         } else if (cancelRequested) {
           logUsb("Ubidots subscribe cancelled");
@@ -334,8 +637,12 @@ static void testRunnerTask(void* pv) {
         }
 
         while (!cancelRequested) {
+          String incomingTopic;
           String value;
-          modem.ubidots().pollVariable(kUbiDevice, kUbiVariable, value);
+          if (modem.mqtt().pollIncoming(incomingTopic, value) &&
+              incomingTopic == topic) {
+            logUsb(String("Ubidots value: ") + value);
+          }
           vTaskDelay(pdMS_TO_TICKS(300));
         }
         modem.mqtt().disconnect();
@@ -358,8 +665,26 @@ static void testRunnerTask(void* pv) {
 
 void setup() {
   Serial.begin(115200);
+  SPI.begin(kSdSclk, kSdMiso, kSdMosi, kSdCs);
+  if (SD.begin(kSdCs, SPI, 4000000)) {
+    logUsb("[sd] init spi freq: 4000000");
+    logUsb("SD init OK");
+  } else {
+    logUsb("SD init failed");
+  }
+  uint32_t expectedSize = 0;
+  uint32_t writtenBytes = 0;
+  uint8_t downloadState = getOtaDownloadState(&expectedSize, &writtenBytes);
+  if (isOtaRecoveryPending() || downloadState == OtaStateDownloading ||
+      downloadState == OtaStateValidating) {
+    otaSdReady = recoverSd();
+    setOtaRecoveryPending(false);
+    setOtaDownloadState(OtaStateIdle, 0, 0);
+  }
   setupWifi();
   randomSeed(millis());
+
+  ota.begin();
 
   dashboard.begin(server, ws);
   dashboard.setCommandHandler(handleDashboardCommand);
@@ -376,6 +701,7 @@ void setup() {
 
 void loop() {
   server.handleClient();
+  ota.handle();
   dashboard.loop();
 
   readSerialLines(Serial, usbLine, DashboardSource::Usb);

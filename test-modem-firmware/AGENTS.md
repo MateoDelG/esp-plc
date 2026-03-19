@@ -1,249 +1,159 @@
 # AGENTS.md
 
-## Propósito del proyecto
+## Proposito del repositorio
 
-Este proyecto implementa una librería y aplicación para **ESP32 + SIMCom A7670SA-FASE** usando **Arduino** y **TinyGSM**, con soporte para:
+Firmware para ESP32 + SIMCom A7670SA-FASE (Arduino + TinyGSM). Incluye app
+principal, libreria `modem-manager` con HTTP/MQTT/SSL y logging de trafico AT.
 
-- inicialización y control del módem
-- registro en red LTE
-- apertura y validación de sesión de datos
-- HTTP
-- MQTT sobre TLS
-- integración con HiveMQ Cloud
-- integración con Ubidots
-- publicación y suscripción MQTT
-- logging detallado del tráfico AT para depuración
+## Estructura rapida
 
-El objetivo principal es mantener una base **robusta, legible y extensible**, sin romper el comportamiento ya validado en campo.
+- `src/` app principal (ESP32 + dashboard).
+- `lib/modem-manager/` libreria propia del modem.
+- `lib/` dependencias vendorizadas.
+- `include/` headers globales (si aplica).
+- `test/` tests para PlatformIO Test Runner (si se agregan).
 
----
+## Alcance de cambios
 
-## Estado funcional actual
+- Preferir cambios en `src/` y `lib/modem-manager/`.
+- Evitar editar librerias vendorizadas en `lib/` salvo necesidad real.
+- Si se toca un vendor, documentar motivo y compatibilidad.
 
-Lo siguiente ya funciona y debe preservarse:
+## Credenciales y datos sensibles
 
-- `begin()` inicializa correctamente el módem
-- el cambio de `ATV0` a `ATV1` evita problemas de parsing
-- la validación de red y datos usando:
-  - `AT+CGATT?`
-  - `AT+CGPADDR=1`
-  - `AT+NETOPEN?`
-- `NETOPEN` ya se maneja correctamente
-- HTTP ya funciona con `HTTPACTION`
-- MQTT TLS ya funciona con HiveMQ Cloud
-- Ubidots publish ya funciona
-- Ubidots subscribe ya funciona
-- las URCs tardías son reales y deben manejarse cuidadosamente
-- el `TapStream` actual permite ver el tráfico AT y no debe romperse
+- No hardcodear tokens reales en commits.
+- Mantener credenciales fuera del repo cuando sea posible.
+- Si se usa ejemplo, usar valores de prueba claramente falsos.
 
----
+## Comandos de build / lint / test
 
-## Reglas clave para cualquier cambio
+### PlatformIO (principal)
 
-### 1. No romper lo que ya funciona
-Antes de modificar:
-- revisar si el comportamiento actual ya fue validado por log real
-- evitar “simplificaciones” que eliminen manejo de URCs tardías
-- no asumir que `OK` implica que la operación ya terminó completamente
+- Build: `pio run -e upesy_wrover`
+- Upload: `pio run -e upesy_wrover -t upload`
+- Monitor serial: `pio device monitor -b 115200`
+- Clean: `pio run -t clean`
 
-### 2. Tratar URCs como asíncronas
-Muchas respuestas del módem llegan en dos fases:
-1. `OK`
-2. una URC posterior, por ejemplo:
-   - `+NETOPEN: ...`
-   - `+HTTPACTION: ...`
-   - `+CMQTTCONNECT: ...`
-   - `+CMQTTPUB: ...`
-   - `+CMQTTSUB: ...`
-   - `+CMQTTRX...`
+### Tests (PlatformIO)
 
-Nunca asumir que `waitResponse()` capturó todo en una sola llamada.
+- Ejecutar todos: `pio test -e upesy_wrover`
+- Ejecutar un test (por nombre): `pio test -e upesy_wrover -f <test_name>`
+- Ejecutar por patron: `pio test -e upesy_wrover -f test_*`
 
-### 3. No reintentar acciones exitosas
-Evitar relanzar:
-- `CMQTTSTART` si ya arrancó
-- `CMQTTCONNECT` si ya conectó
-- `CMQTTPUB` si ya publicó
-- `NETOPEN` si ya está abierto
+### Lint / formato
 
-Muchas fallas previas vinieron de reintentos innecesarios después de un éxito que no fue reconocido correctamente por el código.
+- No hay linter/formatter configurado en este repo.
+- Si agregas uno, documenta el comando aqui y mantn formato consistente.
 
-### 4. Mantener compatibilidad con Arduino
-No introducir dependencias innecesarias.
-El código debe seguir funcionando en entorno Arduino / ESP32.
+## Reglas externas (Cursor/Copilot)
 
----
+- No se encontraron reglas en `.cursor/rules/`, `.cursorrules` ni
+  `.github/copilot-instructions.md`.
 
-## Arquitectura deseada
+## Guias de estilo de codigo
 
-La librería debe evolucionar hacia una organización por responsabilidades:
+### Formato
 
-- `ModemCore`
-  - power
-  - init
-  - SIM
-  - registro
-  - señal
-- `ModemDataSession`
-  - APN
-  - CGATT
-  - CGPADDR
-  - NETOPEN
-- `ModemHttp`
-  - HTTPINIT
-  - HTTPACTION
-  - HTTPREAD
-  - HTTPTERM
-- `ModemMqtt`
-  - CMQTTSTART
-  - CMQTTACCQ
-  - CMQTTCONNECT
-  - publish
-  - subscribe
-  - disconnect
-- `ModemUbidots`
-  - publish de variables
-  - subscribe de variables
-  - parseo de topics/payloads de Ubidots
-- `ModemParsers`
-  - funciones puras para parsear respuestas
+- Indentacion de 2 espacios.
+- Llaves en la misma linea (`if (...) {`).
+- Lineas largas: partir con `+`/`<<`/concatenacion clara y legible.
+- Evitar macros complejas salvo necesidad (prefiere funciones).
 
-Mientras esa separación no esté completa, mantener una estructura interna clara y minimizar duplicación.
+### Includes
 
----
+- Orden sugerido:
+  1) Arduino/SDK (`Arduino.h`, `WiFi.h`)
+  2) Dependencias externas (`TinyGsmClient.h`)
+  3) Headers locales (`modem_*.h`)
+- Mantener guards `#ifndef ... #define ... #endif`.
+- Evitar include circular; usar forward declarations donde aplique.
 
-## Convenciones de implementación
+### Naming
 
-### Nombres
-Preferir nombres orientados a intención:
+- Clases en PascalCase: `ModemManager`, `ModemMqtt`.
+- Metodos/funciones en lowerCamelCase: `ensureDataSession()`.
+- Constantes de archivo con prefijo `k`: `kApn`, `kPinTx`.
+- Enums con `enum class` y valores claros: `ModemState::DataReady`.
+- Archivos y modulos en snake_case: `modem_data_session.cpp`.
+- Booleanos con verbo: `isReady`, `hasIp`, `shouldRetry`.
 
-- `ensureDataSession()`
-- `hasDataSession()`
-- `ensureNetOpen()`
-- `httpGet()`
-- `ensureMqttStarted()`
-- `ensureMqttConnected()`
+### Tipos y memoria
 
-Evitar nombres ambiguos o demasiado ligados a una implementación vieja.
+- Usar tipos fijos (`uint32_t`, `int8_t`) para hardware/tiempos.
+- Usar `String` y `const char*` como en el codigo existente.
+- Evitar asignaciones dinamicas innecesarias en loops criticos.
+- Evitar grandes buffers en stack si pueden vivir en static.
 
-### Logs
-Usar prefijos consistentes:
+### Errores y logs
 
-- `[core]`
-- `[data]`
-- `[http]`
-- `[mqtt]`
-- `[ubidots]`
+- Retornar `bool` en operaciones que pueden fallar.
+- En fallas: log util y setear `lastError` cuando aplique.
+- Conservar respuesta raw si ayuda a diagnosticar (`AtResult.raw`).
+- Prefijos de logs consistentes: `[core]` `[data]` `[http]` `[mqtt]`.
+- Usar `logLine()`/`logValue()` como API principal.
+- No saturar logs en loops; preferir log por periodo (ej. cada 5s).
 
-Mantener `logLine()` y `logValue()` como interfaz principal.
+### Concurrencia y tiempo
 
-### Timeouts
-No quemar timeouts arbitrarios en muchos lugares.
-Si se agregan nuevos, intentar centralizarlos o al menos documentarlos claramente.
+- Considerar URCs asincronas: `OK` no implica fin de operacion.
+- No bloquear demasiado el loop principal; usar timeouts claros.
+- Centralizar delays en helpers cuando se repiten.
 
-### Errores
-Cuando una función falle:
-- dejar log útil
-- conservar la respuesta raw si es valiosa
-- no ocultar un `ERROR` del módem si ayuda a depurar
+### AT commands y prompts
 
----
+- Para comandos con prompt `>` (topic/payload/subtopic):
+  1) esperar `>`
+  2) enviar contenido exacto
+  3) esperar `OK`
+- No encadenar comandos antes de confirmar la aceptacion.
 
-## Reglas específicas del módem A7670SA
+### HTTP/SSL
 
-### Modo de respuestas
-El módem pasa por `ATV0` al inicio, pero el proyecto debe forzar `ATV1` después de inicializar para evitar problemas de parsing.
+- Mantener flujo CSSLCFG -> HTTPPARA -> HTTPACTION -> HTTPREAD.
+- No cambiar chunk size sin validar estabilidad en campo.
+- Mantener muting de TapStream en lecturas masivas.
 
-### Sesión de datos
-La validez de la sesión de datos debe evaluarse con:
-- `CGATT == 1`
-- IP válida en `CGPADDR`
-- `NETOPEN == 1`
+### MQTT
 
-No basta solo con tener IP.
+- Esperar URCs especificas:
+  - `+CMQTTCONNECT: ...`
+  - `+CMQTTPUB: ...`
+  - `+CMQTTSUB: ...`
+  - `+CMQTTRX...`
+- No reintentar acciones exitosas (evita duplicar start/connect/publish).
 
-### MQTT TLS
-Para MQTT con TLS:
-- configurar `CSSLCFG`
-- usar `enableSNI`
-- asociar contexto SSL con `CMQTTSSLCFG`
-- no asumir que `CMQTTCONNECT` queda validado solo con `OK`
-- esperar explícitamente `+CMQTTCONNECT: 0,0`
+## Reglas del modem A7670SA
 
-### Ubidots
-Para Ubidots:
-- broker: `industrial.api.ubidots.com`
-- puerto: `8883`
-- usar TLS
-- el token se usa como credencial MQTT
-- publish:
-  - topic: `/v1.6/devices/<deviceLabel>`
-  - payload JSON: `{"<variableLabel>":<value>}`
-- subscribe:
-  - topic esperado: `/v1.6/devices/<deviceLabel>/<variableLabel>/lv`
+- Forzar `ATV1` despues de init para evitar parsing ambiguo.
+- Sesion de datos valida requiere:
+  - `CGATT == 1`
+  - IP valida en `CGPADDR`
+  - `NETOPEN == 1`
+- MQTT TLS:
+  - configurar `CSSLCFG` + `enableSNI`
+  - asociar SSL con `CMQTTSSLCFG`
+  - esperar `+CMQTTCONNECT: 0,0`
+- Ubidots:
+  - broker `industrial.api.ubidots.com:8883`
+  - token como credencial MQTT
+  - topics esperados segun formato Ubidots.
 
-### Payloads con prompt `>`
-Los comandos:
-- `CMQTTTOPIC`
-- `CMQTTPAYLOAD`
-- `CMQTTSUBTOPIC`
+## Validacion minima post-cambio
 
-requieren:
-1. esperar prompt `>`
-2. enviar el contenido exacto
-3. esperar `OK`
+1. El modem inicializa (`begin()`).
+2. Registra red LTE.
+3. Obtiene IP valida.
+4. `NETOPEN` llega a `1`.
+5. MQTT connect funciona.
+6. MQTT publish funciona.
+7. Ubidots publish funciona.
+8. Ubidots subscribe funciona.
 
-No mezclar eso con el siguiente comando antes de validar la aceptación del payload.
+## Estrategia recomendada de cambios
 
----
-
-## Cosas que NO se deben hacer
-
-- No eliminar el `TapStream` sin reemplazo equivalente
-- No cambiar a una abstracción excesivamente compleja
-- No introducir frameworks nuevos
-- No asumir que un `ERROR` siempre significa fallo fatal, si la URC real indica éxito
-- No limpiar logs “molestos” si son útiles para depuración del módem
-- No reestructurar todo en una sola pasada sin preservar compatibilidad funcional
-
----
-
-## Qué validar después de cualquier cambio
-
-### Validación mínima obligatoria
-1. El módem inicializa
-2. Registra red LTE
-3. Obtiene IP
-4. `NETOPEN` llega a `1`
-5. MQTT connect sigue funcionando
-6. Publish MQTT sigue funcionando
-7. Ubidots publish sigue funcionando
-8. Ubidots subscribe sigue funcionando
-
-### Señales esperadas en logs
-Buscar explícitamente:
-- `+CREG: 0,1`
-- `+CGATT: 1`
-- `+CGPADDR: 1,...`
-- `+NETOPEN: 1`
-- `+CMQTTCONNECT: 0,0`
-- `+CMQTTPUB: 0,0`
-- `+CMQTTSUB: 0,0`
-- `+CMQTTRXTOPIC`
-- `+CMQTTRXPAYLOAD`
-
----
-
-## Estrategia recomendada para cambios
-
-Cuando se haga una modificación importante:
-1. cambiar una sola parte a la vez
-2. probar con logs reales
-3. confirmar que no se dañó:
-   - datos
-   - MQTT
-   - Ubidots
-4. solo después avanzar a otra capa
-
----
-
+- Cambiar una sola capa a la vez.
+- Probar con logs reales.
+- Confirmar que no se rompio:
+  - data session
+  - MQTT
+  - Ubidots

@@ -27,7 +27,8 @@ class Dashboard {
 
   WebServer* server_ = nullptr;
   WebSocketsServer* ws_ = nullptr;
-  LogBuffer modemBuffer_{100};
+  LogBuffer usbBuffer_{200};
+  LogBuffer modemBuffer_{200};
   DashboardCommandHandler commandHandler_ = nullptr;
 };
 

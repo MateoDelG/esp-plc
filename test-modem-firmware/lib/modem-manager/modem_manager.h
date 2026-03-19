@@ -12,7 +12,6 @@
 #include "modem_http.h"
 #include "modem_mqtt.h"
 #include "modem_types.h"
-#include "modem_ubidots.h"
 #include "modem_urc.h"
 #include "modem_tap_stream.h"
 
@@ -55,7 +54,6 @@ class ModemManager {
   ModemDataSession& data() { return data_; }
   ModemHttp& http() { return http_; }
   ModemMqtt& mqtt() { return mqtt_; }
-  ModemUbidots& ubidots() { return ubidots_; }
 
   ModemState state() const { return state_; }
   ModemError lastError() const { return lastError_; }
@@ -71,6 +69,9 @@ class ModemManager {
   void logLine(const String& message);
   void logValue(const String& label, const String& value);
   void logValue(const String& label, int value);
+
+  void setRxLoggingEnabled(bool enabled);
+  void setTxLoggingEnabled(bool enabled);
 
   void setLastError(int code, const String& message);
   void setState(ModemState state) { state_ = state; }
@@ -99,7 +100,6 @@ class ModemManager {
   ModemDataSession data_;
   ModemHttp http_;
   ModemMqtt mqtt_;
-  ModemUbidots ubidots_;
 
   ModemState state_ = ModemState::Off;
   ModemError lastError_;

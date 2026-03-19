@@ -12,6 +12,10 @@ class ModemTapStream : public Stream {
   ModemTapStream(Stream& serial, LineCallback callback);
 
   void setCallback(LineCallback callback);
+  void setRxLoggingEnabled(bool enabled);
+  bool rxLoggingEnabled() const { return rxLoggingEnabled_; }
+  void setTxLoggingEnabled(bool enabled);
+  bool txLoggingEnabled() const { return txLoggingEnabled_; }
 
   int available() override;
   int read() override;
@@ -35,6 +39,8 @@ class ModemTapStream : public Stream {
   bool txOverflowed_ = false;
   bool rxOverflowed_ = false;
   bool lastCloseOk_ = false;
+  bool rxLoggingEnabled_ = true;
+  bool txLoggingEnabled_ = true;
 };
 
 #endif

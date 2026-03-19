@@ -7,12 +7,12 @@ ModemManager::ModemManager(const ModemConfig& config)
 #ifdef DUMP_AT_COMMANDS
       tapStream_(config.serialAT, config.serialMon),
 #else
-      tapStream_(config.serialAT,
-                 [sink = config.modemLogSink](bool isTx, const String& line) {
-                   if (sink) {
-                     sink(isTx, line);
-                   }
-                 }),
+      tapStream_(config.serialAT, [this](bool isTx, const String& line) {
+        ModemLogSink sink = config_.modemLogSink;
+        if (sink) {
+          sink(isTx, line);
+        }
+      }),
 #endif
       modem_(tapStream_),
       urc_(),
@@ -20,8 +20,7 @@ ModemManager::ModemManager(const ModemConfig& config)
       core_(*this),
       data_(*this),
       http_(*this),
-      mqtt_(*this),
-      ubidots_(*this) {}
+      mqtt_(*this) {}
 
 void ModemManager::setLogsEnabled(bool enabled) { config_.enableLogs = enabled; }
 
@@ -130,6 +129,22 @@ void ModemManager::logValue(const String& label, int value) {
   config_.serialMon.print(label);
   config_.serialMon.print(": ");
   config_.serialMon.println(value);
+}
+
+void ModemManager::setRxLoggingEnabled(bool enabled) {
+#ifndef DUMP_AT_COMMANDS
+  tapStream_.setRxLoggingEnabled(enabled);
+#else
+  (void)enabled;
+#endif
+}
+
+void ModemManager::setTxLoggingEnabled(bool enabled) {
+#ifndef DUMP_AT_COMMANDS
+  tapStream_.setTxLoggingEnabled(enabled);
+#else
+  (void)enabled;
+#endif
 }
 
 void ModemManager::setLastError(int code, const String& message) {
