@@ -21,9 +21,10 @@ ModemHttp::ModemHttp(ModemManager& modem) : modem_(modem) {}
 
 static const char kOtaLocalFilename[] = "firmware.bin";
 static const char kModemLocalPrefix[] = "C:/";
-static const size_t kFsReadChunkSize = 256;
 static const size_t kFsFlushThreshold = 8192;
 static const size_t kFsProgressStep = 4096;
+static const size_t kFsReadChunkMin = 64;
+static const size_t kFsReadChunkMax = 1024;
 
 static String resolveLocalFilename(const char* path) {
   if (!path || strlen(path) == 0) {
@@ -200,7 +201,7 @@ static bool waitHttpReadFileResult(ModemManager& modem, ModemLogSink logSink,
 
 static bool copyModemFileToSd(ModemManager& modem, const char* filename,
                               const char* sdPath, int expectedSize,
-                              ModemLogSink logSink) {
+                              size_t fsReadChunkSize, ModemLogSink logSink) {
   auto logLine = [&](const String& line) {
     if (logSink) {
       logSink(false, line);
@@ -209,6 +210,7 @@ static bool copyModemFileToSd(ModemManager& modem, const char* filename,
     }
   };
   logLine("[http] copying modem file to SD");
+  logLine(String("[fs] chunk size: ") + fsReadChunkSize);
 
   SD.remove(sdPath);
   File out = SD.open(sdPath, FILE_WRITE);
@@ -231,8 +233,8 @@ static bool copyModemFileToSd(ModemManager& modem, const char* filename,
   size_t sinceProgress = 0;
 
   while (remaining > 0) {
-    int toRead = remaining > static_cast<int>(kFsReadChunkSize)
-                     ? static_cast<int>(kFsReadChunkSize)
+    int toRead = remaining > static_cast<int>(fsReadChunkSize)
+                     ? static_cast<int>(fsReadChunkSize)
                      : remaining;
     logLine(String("[fs] read request: ") + toRead);
     modem.setTxLoggingEnabled(false);
@@ -471,7 +473,14 @@ bool ModemHttp::downloadToFile(const char* url, const char* sdPath,
     lastHttpLength_ = -1;
     return false;
   }
-  (void)chunkSize;
+  size_t fsReadChunkSize = chunkSize > 0 ? static_cast<size_t>(chunkSize)
+                                         : kFsReadChunkMax;
+  if (fsReadChunkSize < kFsReadChunkMin) {
+    fsReadChunkSize = kFsReadChunkMin;
+  }
+  if (fsReadChunkSize > kFsReadChunkMax) {
+    fsReadChunkSize = kFsReadChunkMax;
+  }
 
   if (!modem_.data().ensureNetOpen()) {
     modem_.logLine("[http] netopen not ready");
@@ -631,7 +640,7 @@ bool ModemHttp::downloadToFile(const char* url, const char* sdPath,
       (sdPath && strlen(sdPath) > 0) ? sdPath : "/firmware.bin";
   logLine(String("[http] sd target path: ") + sdTarget);
   if (!copyModemFileToSd(modem_, modemPath.c_str(), sdTarget, length,
-                         logSink)) {
+                         fsReadChunkSize, logSink)) {
     return false;
   }
   return true;
