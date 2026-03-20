@@ -223,21 +223,50 @@ static bool copyModemFileToSd(ModemManager& modem, const char* filename,
   logLine(String("[fs] temp path: ") + sdTempPath);
 
   if (SD.exists(sdTempPath)) {
-    SD.remove(sdTempPath);
+    logLine(String("[fs] removing stale temp file: ") + sdTempPath);
+    if (!SD.remove(sdTempPath)) {
+      logLine("[fs] stale temp remove failed");
+      logLine("[fs] copy aborted");
+      return false;
+    }
+    logLine("[fs] stale temp remove ok");
   }
+  bool sdFailed = false;
+  auto cleanupTemp = [&](bool afterRecovery) {
+    if (sdFailed && !afterRecovery) {
+      logLine("[fs] temp cleanup skipped because SD is unavailable");
+      return false;
+    }
+    if (!SD.exists(sdTempPath)) {
+      return true;
+    }
+    if (afterRecovery) {
+      logLine("[fs] retrying stale temp cleanup after SD recovery");
+    } else {
+      logLine(String("[fs] temp cleanup: ") + sdTempPath);
+    }
+    if (SD.remove(sdTempPath)) {
+      logLine(afterRecovery ? "[fs] post-recovery temp remove ok"
+                            : "[fs] temp remove ok");
+      return true;
+    }
+    logLine(afterRecovery ? "[fs] post-recovery temp remove failed"
+                          : "[fs] temp remove failed");
+    return false;
+  };
+
   File out = SD.open(sdTempPath, FILE_WRITE);
   if (!out) {
     logLine("[http] sd open failed");
     return false;
   }
+  logLine("[fs] temp file open ok");
 
   int handle = -1;
   if (!fsOpenRead(modem, filename, handle, logSink)) {
     logLine("[http] modem file open failed");
     out.close();
-    if (SD.remove(sdTempPath)) {
-      logLine("[fs] partial file removed");
-    }
+    cleanupTemp(false);
     logLine("[fs] copy aborted");
     return false;
   }
@@ -248,17 +277,6 @@ static bool copyModemFileToSd(ModemManager& modem, const char* filename,
   size_t sinceFlush = 0;
   size_t sinceProgress = 0;
   uint8_t buffer[kFsReadChunkMax];
-
-  auto removePartial = [&]() {
-    out.close();
-    if (SD.exists(sdTempPath)) {
-      if (SD.remove(sdTempPath)) {
-        logLine("[fs] partial file removed");
-      } else {
-        logLine("[fs] partial file remove failed");
-      }
-    }
-  };
 
   while (remaining > 0) {
     int toRead = remaining > static_cast<int>(fsReadChunkSize)
@@ -290,7 +308,8 @@ static bool copyModemFileToSd(ModemManager& modem, const char* filename,
         restoreLogging();
         logLine(String("[fs] close handle: ") + openHandle);
         fsClose(modem, openHandle);
-        removePartial();
+        out.close();
+        cleanupTemp(false);
         logLine("[fs] copy aborted");
         return false;
       }
@@ -307,7 +326,8 @@ static bool copyModemFileToSd(ModemManager& modem, const char* filename,
       restoreLogging();
       logLine(String("[fs] close handle: ") + openHandle);
       fsClose(modem, openHandle);
-      removePartial();
+      out.close();
+      cleanupTemp(false);
       logLine("[fs] copy aborted");
       return false;
     }
@@ -317,7 +337,8 @@ static bool copyModemFileToSd(ModemManager& modem, const char* filename,
       restoreLogging();
       logLine(String("[fs] close handle: ") + openHandle);
       fsClose(modem, openHandle);
-      removePartial();
+      out.close();
+      cleanupTemp(false);
       logLine("[fs] copy aborted");
       return false;
     }
@@ -330,34 +351,34 @@ static bool copyModemFileToSd(ModemManager& modem, const char* filename,
       restoreLogging();
       logLine(String("[fs] close handle: ") + openHandle);
       fsClose(modem, openHandle);
-      removePartial();
+      out.close();
+      cleanupTemp(false);
       logLine("[fs] copy aborted");
       return false;
     }
 
     size_t writeCount = out.write(buffer, static_cast<size_t>(dataLen));
     if (writeCount != static_cast<size_t>(dataLen)) {
-      size_t pos = out.position();
-      size_t tempSize = out.size();
       logLine("[fs] fail: sd write mismatch");
       logLine(String("[fs] write requested: ") + dataLen);
       logLine(String("[fs] write actual: ") + writeCount);
       logLine(String("[fs] totalWritten: ") + totalWritten);
       logLine(String("[fs] sinceFlush: ") + sinceFlush);
       logLine(String("[fs] expected size: ") + expectedSize);
-      logLine(String("[fs] out position: ") + pos);
-      logLine(String("[fs] temp size: ") + tempSize);
+      sdFailed = true;
       out.close();
       restoreLogging();
       logLine(String("[fs] close handle: ") + openHandle);
       fsClose(modem, openHandle);
+      logLine("[fs] temp cleanup deferred until recovery");
+      bool remountOk = false;
       if (sdRecoverFn) {
         logLine("[sd] remount after write mismatch");
-        bool remountOk = sdRecoverFn();
+        remountOk = sdRecoverFn();
         logLine(String("[sd] remount ") + (remountOk ? "ok" : "fail"));
       }
-      if (SD.exists(sdTempPath)) {
-        SD.remove(sdTempPath);
+      if (remountOk) {
+        cleanupTemp(true);
       }
       logLine("[fs] copy aborted");
       return false;
@@ -367,7 +388,8 @@ static bool copyModemFileToSd(ModemManager& modem, const char* filename,
       restoreLogging();
       logLine(String("[fs] close handle: ") + openHandle);
       fsClose(modem, openHandle);
-      removePartial();
+      out.close();
+      cleanupTemp(false);
       logLine("[fs] copy aborted");
       return false;
     }
@@ -387,17 +409,20 @@ static bool copyModemFileToSd(ModemManager& modem, const char* filename,
       logLine(String("[fs] flush done, position=") + posAfter);
       if (posAfter != totalWritten) {
         logLine("[fs] fail: flush position mismatch");
+        sdFailed = true;
         out.close();
         restoreLogging();
         logLine(String("[fs] close handle: ") + openHandle);
         fsClose(modem, openHandle);
+        logLine("[fs] temp cleanup deferred until recovery");
+        bool remountOk = false;
         if (sdRecoverFn) {
           logLine("[sd] remount after flush mismatch");
-          bool remountOk = sdRecoverFn();
+          remountOk = sdRecoverFn();
           logLine(String("[sd] remount ") + (remountOk ? "ok" : "fail"));
         }
-        if (SD.exists(sdTempPath)) {
-          SD.remove(sdTempPath);
+        if (remountOk) {
+          cleanupTemp(true);
         }
         logLine("[fs] copy aborted");
         return false;
@@ -419,9 +444,7 @@ static bool copyModemFileToSd(ModemManager& modem, const char* filename,
   bool closeOk = fsClose(modem, openHandle);
   if (!closeOk) {
     logLine("[fs] fail: close handle");
-    if (SD.exists(sdTempPath)) {
-      SD.remove(sdTempPath);
-    }
+    cleanupTemp(false);
     logLine("[fs] copy aborted");
     return false;
   }
@@ -458,7 +481,9 @@ static bool copyModemFileToSd(ModemManager& modem, const char* filename,
     check.close();
   } else {
     logLine("[fs] temp verify failed after remount");
-    logLine("[fs] verify access failure");
+    logLine("[fs] skipping temp verification because SD is unavailable");
+    sdFailed = true;
+    cleanupTemp(false);
     return false;
   }
   if (totalWritten != static_cast<size_t>(expectedSize) ||
@@ -467,9 +492,7 @@ static bool copyModemFileToSd(ModemManager& modem, const char* filename,
     logLine(String("[fs] totalWritten: ") + totalWritten);
     logLine(String("[fs] expected size: ") + expectedSize);
     logLine(String("[fs] temp size: ") + sdSize);
-    if (SD.exists(sdTempPath)) {
-      SD.remove(sdTempPath);
-    }
+    cleanupTemp(false);
     logLine("[fs] copy aborted");
     return false;
   }
@@ -479,9 +502,7 @@ static bool copyModemFileToSd(ModemManager& modem, const char* filename,
   }
   if (!SD.rename(sdTempPath, sdPath)) {
     logLine("[fs] fail: rename temp to final");
-    if (SD.exists(sdTempPath)) {
-      SD.remove(sdTempPath);
-    }
+    cleanupTemp(false);
     logLine("[fs] copy aborted");
     return false;
   }

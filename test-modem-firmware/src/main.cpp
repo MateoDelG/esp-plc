@@ -31,10 +31,16 @@ static const char kHttpDownloadUrl[] =
     "https://raw.githubusercontent.com/MateoDelG/tests-ota-esp/master/firmware.bin";
 static const char kHttpDownloadPath[] = "/firmware.bin";
 static const uint16_t kHttpDownloadChunkSize = 1024; //512
-static const uint32_t kSdSpiClock = 1000000;
-static const uint32_t kSdFlushThreshold = 65536;
-static const uint32_t kSdProbeSize = 262144;
+static const uint32_t kSdSpiClockHz = 1000000;
+static const uint32_t kSdFlushThreshold = 0;
+static const uint32_t kSdProbeSizeLight = 16384;
+static const uint32_t kSdProbeSizeStress = 1048576;
 static const size_t kSdProbeBlock = 4096;
+static const uint8_t kSdInitRetries = 3;
+static const uint16_t kSdInitPreDelayMs = 150;
+static const uint16_t kSdInitPostSpiDelayMs = 150;
+static const uint16_t kSdInitRetryDelayMs = 400;
+static const uint16_t kSdShutdownDelayMs = 300;
 
 static const char kMqttHost[] =
     "b282c2526e92497b9e5d5741f7483e22.s1.eu.hivemq.cloud";
@@ -74,6 +80,15 @@ static String usbLine;
 
 static Preferences otaPrefs;
 static bool otaSdReady = true;
+static bool sdMounted = false;
+static bool sdValidated = false;
+static bool sdReadyForOta = false;
+
+enum class SdProbeMode : uint8_t {
+  None = 0,
+  Light,
+  Stress,
+};
 
 static const char kOtaPrefNs[] = "ota";
 static const char kOtaPrefState[] = "download_state";
@@ -157,69 +172,76 @@ static void logUsbSink(bool isTx, const String& line) {
   logUsb(line);
 }
 
-static bool sdStressWriteProbe(const char* path) {
-  logUsb("[sd] stress probe start");
+static void setSdState(bool mounted, bool validated) {
+  sdMounted = mounted;
+  sdValidated = validated;
+  sdReadyForOta = mounted && validated;
+}
+
+static bool sdWriteProbe(const char* path, uint32_t probeSize,
+                         const char* label) {
+  logUsb(String("[sd] ") + label + " probe start");
   if (SD.exists(path)) {
-    SD.remove(path);
+    logUsb(String("[sd] ") + label + " probe stale temp detected");
+    if (!SD.remove(path)) {
+      logUsb(String("[sd] ") + label + " probe stale temp remove failed");
+      logUsb("[sd] residual sdprobe.tmp detected; SD marked unhealthy");
+      return false;
+    }
+    if (SD.exists(path)) {
+      logUsb("[sd] residual sdprobe.tmp detected; SD marked unhealthy");
+      return false;
+    }
+    logUsb(String("[sd] ") + label + " probe stale temp removed");
   }
 
   File file = SD.open(path, FILE_WRITE);
   if (!file) {
-    logUsb("[sd] stress probe open fail");
+    logUsb(String("[sd] ") + label + " probe open fail");
     return false;
   }
-  logUsb("[sd] stress probe open ok");
-  logUsb(String("[sd] stress probe size: ") + kSdProbeSize);
-  logUsb(String("[sd] stress probe block: ") + kSdProbeBlock);
+  logUsb(String("[sd] ") + label + " probe open ok");
+  logUsb(String("[sd] ") + label + " probe size: " + probeSize);
+  logUsb(String("[sd] ") + label + " probe block: " + kSdProbeBlock);
+  logUsb(String("[sd] ") + label + " probe flush: final only");
 
   static uint8_t buffer[kSdProbeBlock];
   for (size_t i = 0; i < kSdProbeBlock; ++i) {
     buffer[i] = static_cast<uint8_t>(0xA5 ^ (i & 0xFF));
   }
 
-  size_t remaining = kSdProbeSize;
+  size_t remaining = probeSize;
   size_t totalWritten = 0;
-  bool flushed = false;
   while (remaining > 0) {
     size_t chunk = remaining > kSdProbeBlock ? kSdProbeBlock : remaining;
     size_t written = file.write(buffer, chunk);
     if (written != chunk) {
-      logUsb(String("[sd] stress probe write fail, wrote=") + written +
-             ", expected=" + chunk + ", total=" + totalWritten);
+      logUsb(String("[sd] ") + label +
+             " probe write fail, wrote=" + written + ", expected=" + chunk +
+             ", total=" + totalWritten);
       file.close();
-      if (SD.exists(path)) {
-        SD.remove(path);
-      }
       return false;
     }
     totalWritten += written;
     remaining -= written;
-    if (!flushed && totalWritten >= (kSdProbeSize / 2)) {
-      logUsb(String("[sd] stress probe flush at ") + totalWritten);
-      file.flush();
-      flushed = true;
-    }
   }
 
-  logUsb("[sd] stress probe close");
+  logUsb(String("[sd] ") + label + " probe final flush");
+  file.flush();
+  logUsb(String("[sd] ") + label + " probe final flush ok");
+  logUsb(String("[sd] ") + label + " probe close");
   file.close();
 
   File check = SD.open(path, FILE_READ);
   if (!check) {
-    logUsb("[sd] stress probe reopen fail");
-    if (SD.exists(path)) {
-      SD.remove(path);
-    }
+    logUsb(String("[sd] ") + label + " probe reopen fail");
     return false;
   }
   size_t size = check.size();
-  logUsb(String("[sd] stress probe size read: ") + size);
-  if (size != kSdProbeSize) {
+  logUsb(String("[sd] ") + label + " probe size read: " + size);
+  if (size != probeSize) {
     check.close();
-    if (SD.exists(path)) {
-      SD.remove(path);
-    }
-    logUsb("[sd] stress probe size mismatch");
+    logUsb(String("[sd] ") + label + " probe size mismatch");
     return false;
   }
 
@@ -237,14 +259,89 @@ static bool sdStressWriteProbe(const char* path) {
       }
     }
   }
-  logUsb(String("[sd] stress probe readback ") + (readOk ? "ok" : "fail"));
+  logUsb(String("[sd] ") + label +
+         " probe readback " + (readOk ? "ok" : "fail"));
 
-  bool cleanupOk = false;
-  if (SD.exists(path)) {
-    cleanupOk = SD.remove(path);
+  if (!readOk) {
+    return false;
   }
-  logUsb(String("[sd] stress probe cleanup ") + (cleanupOk ? "ok" : "fail"));
-  return readOk;
+  if (!SD.remove(path)) {
+    logUsb(String("[sd] ") + label + " probe cleanup remove failed");
+    logUsb("[sd] residual sdprobe.tmp detected; SD marked unhealthy");
+    return false;
+  }
+  if (SD.exists(path)) {
+    logUsb("[sd] residual sdprobe.tmp detected; SD marked unhealthy");
+    return false;
+  }
+  logUsb(String("[sd] ") + label + " probe cleanup ok");
+  return true;
+}
+
+static bool sdLightWriteProbe(const char* path) {
+  return sdWriteProbe(path, kSdProbeSizeLight, "light");
+}
+
+static bool sdStressWriteProbe(const char* path) {
+  return sdWriteProbe(path, kSdProbeSizeStress, "stress");
+}
+
+static bool initSdWithRetry(const char* context, SdProbeMode probeMode) {
+  for (uint8_t attempt = 1; attempt <= kSdInitRetries; ++attempt) {
+    logUsb(String("[sd] init ") + context + " attempt " + attempt + "/" +
+           kSdInitRetries);
+    SD.end();
+    SPI.end();
+    delay(kSdInitPreDelayMs);
+    SPI.begin(kSdSclk, kSdMiso, kSdMosi, kSdCs);
+    logUsb(String("[sd] spi clock: ") + kSdSpiClockHz + " Hz");
+    delay(kSdInitPostSpiDelayMs);
+    if (!SD.begin(kSdCs, SPI, kSdSpiClockHz)) {
+      logUsb("[sd] init mount failed");
+      setSdState(false, false);
+      if (attempt < kSdInitRetries) {
+        delay(kSdInitRetryDelayMs);
+      }
+      continue;
+    }
+    logUsb("[sd] init mount ok");
+    setSdState(true, false);
+    if (probeMode == SdProbeMode::None) {
+      return true;
+    }
+    bool probeOk = false;
+    if (probeMode == SdProbeMode::Light) {
+      probeOk = sdLightWriteProbe("/sdprobe.tmp");
+    } else {
+      probeOk = sdStressWriteProbe("/sdprobe.tmp");
+    }
+    if (!probeOk) {
+      logUsb("[sd] init probe failed");
+      logUsb("[sd] mounted but not validated");
+      setSdState(true, false);
+      if (attempt < kSdInitRetries) {
+        delay(kSdInitRetryDelayMs);
+      }
+      continue;
+    }
+    logUsb("[sd] init probe ok");
+    logUsb("[sd] ready for ota");
+    setSdState(true, true);
+    return true;
+  }
+  logUsb("[sd] init failed after retries");
+  setSdState(false, false);
+  SD.end();
+  SPI.end();
+  return false;
+}
+
+static void finalizeSdAfterOta() {
+  logUsb("[sd] finalize after ota copy");
+  SD.end();
+  setSdState(false, false);
+  delay(kSdShutdownDelayMs);
+  logUsb("[sd] finalize done");
 }
 
 static void purgeOtaArtifacts() {
@@ -304,7 +401,7 @@ static uint8_t getOtaDownloadState(uint32_t* expected,
 static bool recoverSd();
 
 static void listSdRoot() {
-  if (!sdStressWriteProbe("/sdprobe.tmp")) {
+  if (!sdLightWriteProbe("/sdprobe.tmp")) {
     if (!recoverSd()) {
       logUsb("SD not ready");
       return;
@@ -340,29 +437,14 @@ static void listSdRoot() {
 
 static bool recoverSd() {
   logUsb("[sd] recovery start");
-  SD.end();
-  logUsb("[sd] recovery spi end");
-  SPI.end();
-  delay(150);
-  SPI.begin(kSdSclk, kSdMiso, kSdMosi, kSdCs);
-  logUsb("[sd] recovery spi begin");
-  delay(100);
-  if (!SD.begin(kSdCs, SPI, kSdSpiClock)) {
-    logUsb("[sd] recovery sd begin fail");
+  bool ok = initSdWithRetry("recovery", SdProbeMode::Stress);
+  if (ok) {
+    purgeOtaArtifacts();
+    logUsb("[sd] recovery ok");
+  } else {
     logUsb("[sd] recovery failed");
-    return false;
   }
-  logUsb("[sd] recovery sd begin ok");
-  delay(100);
-  purgeOtaArtifacts();
-  logUsb("[sd] recovery stress probe start");
-  if (!sdStressWriteProbe("/sdprobe.tmp")) {
-    logUsb("[sd] recovery stress probe fail");
-    logUsb("[sd] recovery failed");
-    return false;
-  }
-  logUsb("[sd] recovery ok");
-  return true;
+  return ok;
 }
 
 static void logModem(const String& line) {
@@ -594,14 +676,42 @@ static void testRunnerTask(void* pv) {
       }
     } else if (currentTest == TestType::HttpDownload) {
       logUsb("HTTP download (OTA txt)...");
+      bool canDownload = true;
       if (cancelRequested) {
         logUsb("HTTP download cancelled");
-      } else if (modem.http().downloadToFile(kHttpDownloadUrl,
+        canDownload = false;
+      } else {
+        if (!sdReadyForOta) {
+          if (!sdMounted) {
+            logUsb("[sd] not mounted");
+            if (!recoverSd()) {
+              logUsb("SD not ready for OTA");
+              canDownload = false;
+            }
+          }
+          if (!sdReadyForOta) {
+            logUsb("[sd] mounted but not validated");
+            if (!sdLightWriteProbe("/sdprobe.tmp")) {
+              logUsb("[sd] validation failed");
+              setSdState(sdMounted, false);
+              logUsb("SD not ready for OTA");
+              canDownload = false;
+            }
+            setSdState(true, true);
+            logUsb("[sd] ready for ota");
+          }
+        }
+      }
+      if (!canDownload) {
+        continue;
+      }
+      if (modem.http().downloadToFile(kHttpDownloadUrl,
                                              kHttpDownloadPath,
                                              kHttpDownloadChunkSize,
                                              logUsbSink, recoverSd,
                                              kSdFlushThreshold)) {
         logUsb("HTTP download OK");
+        finalizeSdAfterOta();
       } else {
         logUsb("HTTP download failed");
       }
@@ -609,8 +719,8 @@ static void testRunnerTask(void* pv) {
       logUsb("OTA install from SD...");
       if (cancelRequested) {
         logUsb("OTA install cancelled");
-      } else if (!sdStressWriteProbe("/sdprobe.tmp")) {
-        logUsb("[sd] stress probe failed");
+      } else if (!sdLightWriteProbe("/sdprobe.tmp")) {
+        logUsb("[sd] light probe failed");
         if (!recoverSd()) {
           logUsb("SD not ready");
           continue;
@@ -705,13 +815,7 @@ static void testRunnerTask(void* pv) {
 
 void setup() {
   Serial.begin(115200);
-  SPI.begin(kSdSclk, kSdMiso, kSdMosi, kSdCs);
-  if (SD.begin(kSdCs, SPI, kSdSpiClock)) {
-    logUsb("SD init OK");
-    if (!sdStressWriteProbe("/sdprobe.tmp")) {
-      logUsb("[sd] stress probe failed after init");
-    }
-  } else {
+  if (!initSdWithRetry("boot", SdProbeMode::Light)) {
     logUsb("SD init failed");
   }
   uint32_t expectedSize = 0;

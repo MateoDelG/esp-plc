@@ -17,7 +17,7 @@ class ModemHttp {
                       uint16_t chunkSize = 256,
                       ModemLogSink logSink = nullptr,
                       bool (*sdRecoverFn)() = nullptr,
-                      uint16_t flushThreshold = 65536,
+                      uint16_t flushThreshold = 0,
                       bool (*sdRemountFn)() = nullptr);
   bool lastDownloadFailedAfterTemp() const {
     return lastDownloadFailedAfterTemp_;
