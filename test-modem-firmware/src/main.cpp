@@ -30,7 +30,9 @@ static const char kHttpTestUrl[] = "http://example.com/";
 static const char kHttpDownloadUrl[] =
     "https://raw.githubusercontent.com/MateoDelG/tests-ota-esp/master/firmware.bin";
 static const char kHttpDownloadPath[] = "/firmware.bin";
-static const uint16_t kHttpDownloadChunkSize = 254; //512
+static const uint16_t kHttpDownloadChunkSize = 1024; //512
+static const uint32_t kSdSpiClock = 4000000;
+static const uint32_t kSdFlushThreshold = 32768;
 
 static const char kMqttHost[] =
     "b282c2526e92497b9e5d5741f7483e22.s1.eu.hivemq.cloud";
@@ -305,7 +307,7 @@ static bool recoverSd() {
   SPI.begin(kSdSclk, kSdMiso, kSdMosi, kSdCs);
   logUsb("[sd] recovery spi begin");
   delay(100);
-  if (SD.begin(kSdCs)) {
+  if (SD.begin(kSdCs, SPI, kSdSpiClock)) {
     logUsb("[sd] recovery sd begin ok");
     delay(100);
     purgeOtaArtifacts();
@@ -560,7 +562,8 @@ static void testRunnerTask(void* pv) {
       } else if (modem.http().downloadToFile(kHttpDownloadUrl,
                                              kHttpDownloadPath,
                                              kHttpDownloadChunkSize,
-                                             logUsbSink, recoverSd)) {
+                                             logUsbSink, recoverSd,
+                                             kSdFlushThreshold)) {
         logUsb("HTTP download OK");
       } else {
         logUsb("HTTP download failed");
@@ -666,7 +669,7 @@ static void testRunnerTask(void* pv) {
 void setup() {
   Serial.begin(115200);
   SPI.begin(kSdSclk, kSdMiso, kSdMosi, kSdCs);
-  if (SD.begin(kSdCs)) {
+  if (SD.begin(kSdCs, SPI, kSdSpiClock)) {
     logUsb("SD init OK");
   } else {
     logUsb("SD init failed");

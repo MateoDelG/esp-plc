@@ -45,6 +45,7 @@ class AtClient {
 
   bool readExact(size_t length, String& out, uint32_t timeoutMs);
   bool readExactToFile(size_t length, File& file, uint32_t timeoutMs);
+  bool readExactToBuffer(uint8_t* buffer, size_t length, uint32_t timeoutMs);
 
  private:
   TinyGsm& modem_;

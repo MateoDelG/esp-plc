@@ -2,8 +2,8 @@
 
 ## Proposito del repositorio
 
-Firmware para ESP32 + SIMCom A7670SA-FASE (Arduino + TinyGSM). Incluye app
-principal, libreria `modem-manager` con HTTP/MQTT/SSL y logging de trafico AT.
+Firmware para ESP32 + SIMCom A7670SA-FASE (Arduino + TinyGSM). Incluye la app
+principal y la libreria `modem-manager` con HTTP/MQTT/SSL y logging de trafico AT.
 
 ## Estructura rapida
 
@@ -43,7 +43,7 @@ principal, libreria `modem-manager` con HTTP/MQTT/SSL y logging de trafico AT.
 ### Lint / formato
 
 - No hay linter/formatter configurado en este repo.
-- Si agregas uno, documenta el comando aqui y mantn formato consistente.
+- Si agregas uno, documenta el comando aqui y manten formato consistente.
 
 ## Reglas externas (Cursor/Copilot)
 
@@ -58,6 +58,7 @@ principal, libreria `modem-manager` con HTTP/MQTT/SSL y logging de trafico AT.
 - Llaves en la misma linea (`if (...) {`).
 - Lineas largas: partir con `+`/`<<`/concatenacion clara y legible.
 - Evitar macros complejas salvo necesidad (prefiere funciones).
+- Mantener funciones cortas; dividir cuando mezclen varias responsabilidades.
 
 ### Includes
 
@@ -83,6 +84,7 @@ principal, libreria `modem-manager` con HTTP/MQTT/SSL y logging de trafico AT.
 - Usar `String` y `const char*` como en el codigo existente.
 - Evitar asignaciones dinamicas innecesarias en loops criticos.
 - Evitar grandes buffers en stack si pueden vivir en static.
+- Preferir `static` para buffers reutilizados en operaciones frecuentes.
 
 ### Errores y logs
 
@@ -98,6 +100,7 @@ principal, libreria `modem-manager` con HTTP/MQTT/SSL y logging de trafico AT.
 - Considerar URCs asincronas: `OK` no implica fin de operacion.
 - No bloquear demasiado el loop principal; usar timeouts claros.
 - Centralizar delays en helpers cuando se repiten.
+- Evitar waits sin timeout; preferir polling con limites y logs claros.
 
 ### AT commands y prompts
 
@@ -106,6 +109,7 @@ principal, libreria `modem-manager` con HTTP/MQTT/SSL y logging de trafico AT.
   2) enviar contenido exacto
   3) esperar `OK`
 - No encadenar comandos antes de confirmar la aceptacion.
+- Si una URC indica error, cortar el flujo y registrar contexto.
 
 ### HTTP/SSL
 
@@ -121,6 +125,7 @@ principal, libreria `modem-manager` con HTTP/MQTT/SSL y logging de trafico AT.
   - `+CMQTTSUB: ...`
   - `+CMQTTRX...`
 - No reintentar acciones exitosas (evita duplicar start/connect/publish).
+- Reintentos solo ante errores confirmados y con backoff.
 
 ## Reglas del modem A7670SA
 

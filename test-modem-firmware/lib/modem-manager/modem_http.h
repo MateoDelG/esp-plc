@@ -16,7 +16,9 @@ class ModemHttp {
   bool downloadToFile(const char* url, const char* sdPath,
                       uint16_t chunkSize = 256,
                       ModemLogSink logSink = nullptr,
-                      bool (*sdRecoverFn)() = nullptr);
+                      bool (*sdRecoverFn)() = nullptr,
+                      uint16_t flushThreshold = 1024,
+                      bool (*sdRemountFn)() = nullptr);
   bool lastDownloadFailedAfterTemp() const {
     return lastDownloadFailedAfterTemp_;
   }

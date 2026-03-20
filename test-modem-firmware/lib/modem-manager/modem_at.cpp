@@ -185,3 +185,36 @@ bool AtClient::readExactToFile(size_t length, File& file, uint32_t timeoutMs) {
 
   return written == length;
 }
+
+bool AtClient::readExactToBuffer(uint8_t* buffer, size_t length,
+                                 uint32_t timeoutMs) {
+  if (!buffer || length == 0) {
+    return false;
+  }
+  uint32_t start = millis();
+  size_t readTotal = 0;
+
+  while (readTotal < length && millis() - start < timeoutMs) {
+    size_t available = stream_.available();
+    if (available == 0) {
+      delay(5);
+      continue;
+    }
+
+    size_t remaining = length - readTotal;
+    size_t toRead = available;
+    if (toRead > remaining) {
+      toRead = remaining;
+    }
+
+    size_t readCount =
+        stream_.readBytes(buffer + readTotal, static_cast<size_t>(toRead));
+    if (readCount == 0) {
+      delay(5);
+      continue;
+    }
+    readTotal += readCount;
+  }
+
+  return readTotal == length;
+}
