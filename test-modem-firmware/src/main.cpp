@@ -37,9 +37,9 @@ static const uint32_t kSdProbeSizeLight = 16384;
 static const uint32_t kSdProbeSizeStress = 1048576;
 static const size_t kSdProbeBlock = 4096;
 static const uint8_t kSdInitRetries = 3;
-static const uint16_t kSdInitPreDelayMs = 150;
+static const uint16_t kSdInitPreSpiDelayMs = 250;
 static const uint16_t kSdInitPostSpiDelayMs = 150;
-static const uint16_t kSdInitRetryDelayMs = 400;
+static const uint16_t kSdInitRetryGapMs = 400;
 static const uint16_t kSdShutdownDelayMs = 300;
 
 static const char kMqttHost[] =
@@ -237,6 +237,7 @@ static bool sdWriteProbe(const char* path, uint32_t probeSize,
     logUsb(String("[sd] ") + label + " probe reopen fail");
     return false;
   }
+  bool readOk = true;
   size_t size = check.size();
   logUsb(String("[sd] ") + label + " probe size read: " + size);
   if (size != probeSize) {
@@ -244,38 +245,64 @@ static bool sdWriteProbe(const char* path, uint32_t probeSize,
     logUsb(String("[sd] ") + label + " probe size mismatch");
     return false;
   }
+  if (!check.seek(0)) {
+    logUsb(String("[sd] ") + label + " probe seek(0) failed");
+    readOk = false;
+  }
 
-  uint8_t readback[8] = {0};
-  size_t readCount = check.readBytes(reinterpret_cast<char*>(readback),
-                                     sizeof(readback));
-  check.close();
-  bool readOk = (readCount == sizeof(readback));
   if (readOk) {
-    for (size_t i = 0; i < sizeof(readback); ++i) {
-      uint8_t expected = static_cast<uint8_t>(0xA5 ^ (i & 0xFF));
-      if (readback[i] != expected) {
+    static uint8_t readBuffer[kSdProbeBlock];
+    size_t remainingRead = probeSize;
+    size_t offset = 0;
+    while (remainingRead > 0) {
+      size_t chunk = remainingRead > kSdProbeBlock ? kSdProbeBlock
+                                                   : remainingRead;
+      size_t readCount = check.readBytes(
+          reinterpret_cast<char*>(readBuffer), chunk);
+      if (readCount != chunk) {
+        logUsb(String("[sd] ") + label +
+               " probe short read at offset " + offset + ", got " +
+               readCount + ", expected " + chunk);
         readOk = false;
         break;
       }
+      for (size_t i = 0; i < readCount; ++i) {
+        uint8_t expected =
+            static_cast<uint8_t>(0xA5 ^ ((offset + i) & 0xFF));
+        if (readBuffer[i] != expected) {
+          logUsb(String("[sd] ") + label +
+                 " probe mismatch at offset " + (offset + i) +
+                 " expected " + expected + " got " + readBuffer[i]);
+          readOk = false;
+          break;
+        }
+      }
+      if (!readOk) {
+        break;
+      }
+      remainingRead -= readCount;
+      offset += readCount;
     }
   }
+
+  check.close();
   logUsb(String("[sd] ") + label +
          " probe readback " + (readOk ? "ok" : "fail"));
 
-  if (!readOk) {
-    return false;
-  }
+  bool cleanupOk = true;
   if (!SD.remove(path)) {
     logUsb(String("[sd] ") + label + " probe cleanup remove failed");
     logUsb("[sd] residual sdprobe.tmp detected; SD marked unhealthy");
-    return false;
+    cleanupOk = false;
   }
   if (SD.exists(path)) {
     logUsb("[sd] residual sdprobe.tmp detected; SD marked unhealthy");
-    return false;
+    cleanupOk = false;
   }
-  logUsb(String("[sd] ") + label + " probe cleanup ok");
-  return true;
+  if (cleanupOk) {
+    logUsb(String("[sd] ") + label + " probe cleanup ok");
+  }
+  return readOk && cleanupOk;
 }
 
 static bool sdLightWriteProbe(const char* path) {
@@ -290,17 +317,22 @@ static bool initSdWithRetry(const char* context, SdProbeMode probeMode) {
   for (uint8_t attempt = 1; attempt <= kSdInitRetries; ++attempt) {
     logUsb(String("[sd] init ") + context + " attempt " + attempt + "/" +
            kSdInitRetries);
+    logUsb("[sd] ending previous SD/SPI state");
     SD.end();
     SPI.end();
-    delay(kSdInitPreDelayMs);
+    logUsb(String("[sd] wait pre-spi ") + kSdInitPreSpiDelayMs + " ms");
+    delay(kSdInitPreSpiDelayMs);
+    logUsb("[sd] spi begin");
     SPI.begin(kSdSclk, kSdMiso, kSdMosi, kSdCs);
     logUsb(String("[sd] spi clock: ") + kSdSpiClockHz + " Hz");
+    logUsb(String("[sd] wait post-spi ") + kSdInitPostSpiDelayMs + " ms");
     delay(kSdInitPostSpiDelayMs);
     if (!SD.begin(kSdCs, SPI, kSdSpiClockHz)) {
       logUsb("[sd] init mount failed");
       setSdState(false, false);
       if (attempt < kSdInitRetries) {
-        delay(kSdInitRetryDelayMs);
+        logUsb(String("[sd] wait retry gap ") + kSdInitRetryGapMs + " ms");
+        delay(kSdInitRetryGapMs);
       }
       continue;
     }
@@ -320,7 +352,8 @@ static bool initSdWithRetry(const char* context, SdProbeMode probeMode) {
       logUsb("[sd] mounted but not validated");
       setSdState(true, false);
       if (attempt < kSdInitRetries) {
-        delay(kSdInitRetryDelayMs);
+        logUsb(String("[sd] wait retry gap ") + kSdInitRetryGapMs + " ms");
+        delay(kSdInitRetryGapMs);
       }
       continue;
     }
