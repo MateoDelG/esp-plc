@@ -10,7 +10,7 @@ constexpr bool kUbiUseTls = true;
 constexpr const char* kUbiDeviceLabel = "aqcuicola-001";
 constexpr const char* kUbiClientId = "aqcuicola-001";
 
-constexpr uint32_t kUbiPublishIntervalMs = 30000;
+constexpr uint32_t kUbiPublishIntervalMs = 60000;
 constexpr uint32_t kUbiPollIntervalMs = 1000;
 constexpr uint32_t kUbiReconnectIntervalMs = 5000;
 constexpr uint8_t kUbiConnectRetries = 3;

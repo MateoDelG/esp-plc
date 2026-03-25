@@ -7,7 +7,11 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
 
+#include "models/analog_snapshot.h"
 #include "services/console/log_buffer.h"
+#include "models/telemetry_packet.h"
+
+class AnalogAcquisitionService;
 
 class ConsoleService {
  public:
@@ -16,6 +20,9 @@ class ConsoleService {
   void begin();
   void update();
   void enqueue(const char* line);
+  void setTelemetry(const TelemetryPacket& data);
+  void setAnalogSnapshot(const AnalogSnapshot& snapshot);
+  void setAnalogControl(AnalogAcquisitionService* service);
 
   static void setActive(ConsoleService* service);
   static void logSink(const char* line);
@@ -34,6 +41,9 @@ class ConsoleService {
   WebSocketsServer ws_;
   LogBuffer buffer_{200};
   QueueHandle_t logQueue_ = nullptr;
+  TelemetryPacket latestTelemetry_;
+  AnalogSnapshot latestAnalog_;
+  AnalogAcquisitionService* analogService_ = nullptr;
 
   static ConsoleService* active_;
 };

@@ -1,5 +1,11 @@
 #include "services/console/console_service.h"
 
+#include "services/console/pages/dashboard_page.h"
+#include "services/console/pages/dashboard_style.h"
+#include "services/console/pages/dashboard_script.h"
+#include "services/console/pages/console_fragment.h"
+#include "services/acquisition/analog_acquisition_service.h"
+
 ConsoleService* ConsoleService::active_ = nullptr;
 
 ConsoleService::ConsoleService() : server_(kHttpPort), ws_(kWsPort) {}
@@ -10,34 +16,96 @@ void ConsoleService::begin() {
   }
 
   server_.on("/", [this]() {
-    const char* page =
-      "<!doctype html><html lang='en'><head><meta charset='utf-8'/>"
-      "<meta name='viewport' content='width=device-width,initial-scale=1'/>"
-      "<title>Device Console</title>"
-      "<style>body{margin:0;background:#101214;color:#e7ecef;font-family:"
-      "ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,'Liberation Mono',"
-      "'Courier New',monospace;}header{padding:12px 16px;border-bottom:1px solid"
-      "#242a2f;color:#9aa4ad;display:flex;justify-content:space-between;}"
-      "#console{padding:12px 16px;white-space:pre-wrap;min-height:calc(100vh-52px);"
-      "box-sizing:border-box;}#status{font-size:12px;}</style></head><body>"
-      "<header><div>Console</div><div id='status'>connecting...</div></header>"
-      "<div id='console'>Waiting for messages...</div>"
-      "<script>"
-      "var statusEl=document.getElementById('status');"
-      "var consoleEl=document.getElementById('console');"
-      "var ws=new WebSocket('ws://'+location.hostname+':81/');"
-      "ws.onopen=function(){statusEl.textContent='connected';};"
-      "ws.onerror=function(){statusEl.textContent='error';};"
-      "ws.onclose=function(){statusEl.textContent='disconnected';};"
-      "ws.onmessage=function(e){"
-      "if(consoleEl.textContent==='Waiting for messages...'){consoleEl.textContent='';}"
-      "consoleEl.textContent+=e.data+'\\n';"
-      "window.scrollTo(0,document.body.scrollHeight);" 
-      "};"
-      "</script>"
-      "</body></html>";
+    String page;
+    page.reserve(16000);
+    page += "<!doctype html><html lang='en'><head><meta charset='utf-8'/>";
+    page += "<meta name='viewport' content='width=device-width,initial-scale=1'/>";
+    page += "<title>Aquaculture Dashboard</title>";
+    page += kDashboardStyle;
+    page += "</head><body>";
+    page += kDashboardPage;
+    page += kConsoleFragment;
+    page += kDashboardScript;
+    page += "</body></html>";
     server_.sendHeader("Cache-Control", "no-store, max-age=0");
     server_.send(200, "text/html", page);
+  });
+
+  server_.on("/api/dashboard", HTTP_GET, [this]() {
+    String payload;
+    payload.reserve(256);
+    payload += "{";
+    payload += "\"phTank1\":" + String(latestTelemetry_.phTank1, 2) + ",";
+    payload += "\"phTank2\":" + String(latestTelemetry_.phTank2, 2) + ",";
+    payload += "\"o2Tank1\":" + String(latestTelemetry_.o2Tank1, 2) + ",";
+    payload += "\"o2Tank2\":" + String(latestTelemetry_.o2Tank2, 2) + ",";
+    payload += "\"tempTank1\":" + String(latestTelemetry_.tempTank1, 2) + ",";
+    payload += "\"tempTank2\":" + String(latestTelemetry_.tempTank2, 2) + ",";
+    payload += "\"levelTank1\":" + String(latestTelemetry_.levelTank1, 2) + ",";
+    payload += "\"levelTank2\":" + String(latestTelemetry_.levelTank2, 2) + ",";
+    payload += "\"stateBlowers\":" + String(latestTelemetry_.stateBlowers ? "true" : "false") + ",";
+    payload += "\"timestampMs\":" + String(millis());
+    payload += "}";
+    server_.sendHeader("Cache-Control", "no-store, max-age=0");
+    server_.send(200, "application/json", payload);
+  });
+
+  server_.on("/api/analog", HTTP_GET, [this]() {
+    String payload;
+    payload.reserve(256);
+    payload += "{";
+    payload += "\"enabledMask\":" + String(latestAnalog_.enabledMask) + ",";
+    payload += "\"channels\":[";
+    for (uint8_t i = 0; i < 4; ++i) {
+      const AnalogChannelReading& ch = latestAnalog_.channels[i];
+      payload += "{";
+      payload += "\"ch\":" + String(ch.channel) + ",";
+      payload += "\"raw\":" + String(ch.raw) + ",";
+      payload += "\"volts\":" + String(ch.volts, 3) + ",";
+      payload += "\"valid\":" + String(ch.valid ? "true" : "false") + ",";
+      payload += "\"ts\":" + String(ch.timestampMs);
+      payload += "}";
+      if (i < 3) {
+        payload += ",";
+      }
+    }
+    payload += "]}";
+    server_.sendHeader("Cache-Control", "no-store, max-age=0");
+    server_.send(200, "application/json", payload);
+  });
+
+  server_.on("/api/analog/enable", HTTP_POST, [this]() {
+    String body = server_.arg("plain");
+    int idx = body.indexOf("enabledMask");
+    uint8_t mask = latestAnalog_.enabledMask;
+    if (idx >= 0) {
+      int colon = body.indexOf(':', idx);
+      if (colon >= 0) {
+        int end = body.indexOf('}', colon);
+        if (end < 0) {
+          end = body.length();
+        }
+        String value = body.substring(colon + 1, end);
+        value.replace("\"", "");
+        value.trim();
+        int parsed = value.toInt();
+        if (parsed >= 0 && parsed <= 15) {
+          mask = static_cast<uint8_t>(parsed);
+        }
+      }
+    }
+
+    latestAnalog_.enabledMask = mask;
+    if (analogService_) {
+      analogService_->setEnabledMask(mask);
+    }
+    String payload;
+    payload.reserve(128);
+    payload += "{";
+    payload += "\"enabledMask\":" + String(mask);
+    payload += "}";
+    server_.sendHeader("Cache-Control", "no-store, max-age=0");
+    server_.send(200, "application/json", payload);
   });
 
   server_.begin();
@@ -85,6 +153,18 @@ void ConsoleService::enqueue(const char* line) {
   if (xQueueSend(logQueue_, &copy, 0) != pdTRUE) {
     free(copy);
   }
+}
+
+void ConsoleService::setTelemetry(const TelemetryPacket& data) {
+  latestTelemetry_ = data;
+}
+
+void ConsoleService::setAnalogSnapshot(const AnalogSnapshot& snapshot) {
+  latestAnalog_ = snapshot;
+}
+
+void ConsoleService::setAnalogControl(AnalogAcquisitionService* service) {
+  analogService_ = service;
 }
 
 void ConsoleService::setActive(ConsoleService* service) {

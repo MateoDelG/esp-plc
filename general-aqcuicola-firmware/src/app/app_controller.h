@@ -5,6 +5,7 @@
 #include "comms/ubidots/ubidots_service.h"
 #include "core/logger.h"
 #include "models/device_status.h"
+#include "services/acquisition/analog_acquisition_service.h"
 #include "services/ota/ota_service.h"
 #include "services/telemetry/telemetry_service.h"
 #include "services/console/console_service.h"
@@ -28,6 +29,7 @@ class AppController {
   UbidotsService ubidotsService_;
   TelemetryService telemetryService_;
   ConsoleService consoleService_;
+  AnalogAcquisitionService analogService_;
   DeviceStatus status_;
   AppState state_;
 };

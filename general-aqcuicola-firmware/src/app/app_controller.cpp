@@ -9,6 +9,7 @@ AppController::AppController()
     ubidotsService_(logger_),
     telemetryService_(logger_, ubidotsService_),
     consoleService_(),
+    analogService_(logger_),
     status_(),
     state_(AppState::Boot) {}
 
@@ -31,6 +32,7 @@ void AppController::begin() {
   consoleService_.begin();
   ConsoleService::setActive(&consoleService_);
   logger_.setSink(ConsoleService::logSink);
+  consoleService_.setAnalogControl(&analogService_);
   logger_.info("console: ready");
 
   setState(AppState::WifiReady);
@@ -53,6 +55,7 @@ void AppController::begin() {
   }
 
   telemetryService_.begin();
+  analogService_.begin();
   setState(AppState::Running);
 }
 
@@ -64,6 +67,9 @@ void AppController::update() {
   consoleService_.update();
 
   telemetryService_.update();
+  consoleService_.setTelemetry(telemetryService_.data());
+  analogService_.update();
+  consoleService_.setAnalogSnapshot(analogService_.data());
 
   status_.modemReady = ubidotsService_.isModemReady();
   status_.ubidotsConnected = ubidotsService_.isConnected();
