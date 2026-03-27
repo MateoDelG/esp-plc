@@ -65,7 +65,7 @@ void AppController::begin() {
   telemetryService_.begin();
   analogService_.begin();
   setState(AppState::Running);
-  logger_.info("version: 1.09");
+  logger_.info("version: 1.10");
 
 }
 

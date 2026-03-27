@@ -489,6 +489,135 @@ bool ModemHttp::downloadToFile(const char* url, const char* sdPath,
 #endif
 }
 
+bool ModemHttp::downloadToModemFile(const char* url, const char* modemPath,
+                                   ModemLogSink logSink) {
+  lastDownloadFailedAfterTemp_ = false;
+  auto logLine = [&](const String& line) {
+    if (logSink) {
+      logSink(false, line);
+    } else {
+      modem_.logInfo("http", line);
+    }
+  };
+  auto logValue = [&](const String& label, int value) {
+    if (logSink) {
+      logSink(false, label + ": " + String(value));
+    } else {
+      modem_.logInfo("http", label + ": " + String(value));
+    }
+  };
+  if (!url || strlen(url) == 0) {
+    lastHttpLength_ = -1;
+    return modem_.fail("http", ModemErrorCode::InvalidArgument,
+                       "http url empty", modem_.state());
+  }
+
+  if (!modem_.data().ensureNetOpen()) {
+    lastHttpLength_ = -1;
+    return modem_.fail("http", ModemErrorCode::NetOpenFailed,
+                       "http netopen not ready", modem_.state());
+  }
+
+  modem_.transitionTo(ModemState::HttpBusy, "http download");
+  httpDrainActionUrc(modem_);
+  modem_.at().exec(2000L, GF("+HTTPTERM"));
+
+  String urlStr(url);
+  urlStr.trim();
+  bool useTls = urlStr.startsWith("https://");
+  uint32_t actionTimeout = useTls ? 90000UL : 60000UL;
+  if (useTls) {
+    modem_.logInfo("http", "HTTPS detected");
+    if (!httpConfigureSsl(modem_)) {
+      modem_.at().exec(2000L, GF("+HTTPTERM"));
+      lastHttpLength_ = -1;
+      return modem_.fail("http", ModemErrorCode::HttpSslConfigFailed,
+                         "http ssl cfg failed", ModemState::Error);
+    }
+  }
+
+  if (!httpInit(modem_)) {
+    lastHttpLength_ = -1;
+    return modem_.fail("http", ModemErrorCode::HttpInitFailed,
+                       "http init failed", ModemState::Error);
+  }
+
+  if (useTls) {
+    modem_.logInfo("http", "HTTPPARA SSLCFG");
+    if (!modem_.at().exec(5000L, GF("+HTTPPARA=\"SSLCFG\",0")).ok) {
+      modem_.at().exec(2000L, GF("+HTTPTERM"));
+      lastHttpLength_ = -1;
+      return modem_.fail("http", ModemErrorCode::HttpInitFailed,
+                         "http para sslcfg failed", ModemState::Error);
+    }
+  }
+
+  if (!httpSetUrl(modem_, url)) {
+    modem_.at().exec(2000L, GF("+HTTPTERM"));
+    lastHttpLength_ = -1;
+    return modem_.fail("http", ModemErrorCode::HttpInitFailed,
+                       "http para url failed", ModemState::Error);
+  }
+
+  if (!httpSetTimeouts(modem_, 60, 60)) {
+    modem_.at().exec(2000L, GF("+HTTPTERM"));
+    lastHttpLength_ = -1;
+    return modem_.fail("http", ModemErrorCode::HttpInitFailed,
+                       "http para timeouts failed", ModemState::Error);
+  }
+
+  int status = 0;
+  int length = 0;
+  if (!httpActionGet(modem_, actionTimeout, status, length, logSink)) {
+    modem_.logWarn("http", "httpaction timeout");
+    modem_.logWarn("http", "read skipped, no action result");
+    modem_.at().exec(2000L, GF("+HTTPTERM"));
+    lastHttpLength_ = -1;
+    return modem_.fail("http", ModemErrorCode::HttpActionTimeout,
+                       "httpaction timeout", ModemState::Error);
+  }
+
+  logValue("[http] action status", status);
+  logValue("[http] action length", length);
+  lastHttpLength_ = length;
+
+  if (status != 200 || length <= 0) {
+    logLine("[http] read loop skipped");
+    httpTerm(modem_);
+    if (length <= 0) {
+      lastHttpLength_ = -1;
+    }
+    return modem_.fail("http", ModemErrorCode::HttpActionFailed,
+                       "http status not ok", ModemState::Error);
+  }
+
+  String targetName = httpResolveLocalFilename(modemPath);
+  String modemPathResolved = String(kModemLocalPrefix) + targetName;
+  logLine("[http] starting HTTPREADFILE download");
+  logValue("[http] expected size", length);
+  logLine(String("[http] target filename: ") + targetName);
+  logLine("[http] target storage: local");
+  logLine("[http] saving response with HTTPREADFILE");
+
+  bool readFileCmdOk = modem_.at().exec(120000L, GF("+HTTPREADFILE=\""),
+                                        targetName.c_str(), GF("\",1"))
+                           .ok;
+  int readFileErr = -1;
+  bool readFileUrcOk = httpWaitReadFileResult(modem_, logSink, readFileErr,
+                                              120000UL);
+  httpTerm(modem_);
+  if (!readFileCmdOk || !readFileUrcOk || readFileErr != 0) {
+    logLine("[http] HTTPREADFILE failed");
+    return modem_.fail("http", ModemErrorCode::HttpReadFailed,
+                       "http readfile failed", ModemState::Error);
+  }
+
+  logLine("[http] HTTPREADFILE success");
+  logLine(String("[http] modem target path: ") + modemPathResolved);
+  modem_.transitionTo(ModemState::NetOpenReady, "http download done");
+  return true;
+}
+
 bool ModemHttp::verifyFileOnSd(const char* path, size_t expectedSize,
                                size_t previewBytes, ModemLogSink logSink) {
   auto logLine = [&](const String& line) {

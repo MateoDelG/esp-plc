@@ -19,6 +19,8 @@ class ModemHttp {
                       bool (*sdRecoverFn)() = nullptr,
                       uint16_t flushThreshold = 0,
                       bool (*sdRemountFn)() = nullptr);
+  bool downloadToModemFile(const char* url, const char* modemPath,
+                           ModemLogSink logSink = nullptr);
   bool lastDownloadFailedAfterTemp() const {
     return lastDownloadFailedAfterTemp_;
   }
