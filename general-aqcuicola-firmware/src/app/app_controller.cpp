@@ -15,6 +15,7 @@ AppController::AppController()
     analogService_(logger_),
     otaModemService_(logger_),
     uart1Master_(logger_),
+    pcfIoService_(logger_),
     status_(),
     state_(AppState::Boot) {}
 
@@ -41,6 +42,8 @@ void AppController::begin() {
   consoleService_.setBlowerThresholdRefs(&blowerThresholdA0_, &blowerThresholdA1_);
   consoleService_.setBlowerDelayRef(&blowerNotifyDelaySec_);
   consoleService_.setUartMaster(&uart1Master_);
+  consoleService_.setPcfIoService(&pcfIoService_);
+  consoleService_.setBlowerAlarmRef(&blowerAlarmEnabled_);
   logger_.info("console: ready");
 
   setState(AppState::WifiReady);
@@ -67,6 +70,7 @@ void AppController::begin() {
 
   telemetryService_.begin();
   analogService_.begin();
+  pcfIoService_.begin();
   uart1Master_.begin();
   setState(AppState::Running);
   logger_.info("version: 1.10");
@@ -80,6 +84,8 @@ void AppController::update() {
   }
 
   consoleService_.update();
+
+  pcfIoService_.update();
 
   telemetryService_.update();
   consoleService_.setTelemetry(telemetryService_.data());
@@ -103,12 +109,22 @@ void AppController::update() {
   bool verifierState = belowThreshold ? false : telemetryService_.data().stateBlowers;
   consoleService_.setBlowerStatus(verifierState, belowThreshold);
 
+  uint32_t delayMs = static_cast<uint32_t>(blowerNotifyDelaySec_) * 1000U;
+
+  if (pcfIoService_.isReady()) {
+    bool alarmOn = blowerAlarmEnabled_ && !verifierState &&
+      (millis() - blowerCandidateStartMs_ >= delayMs);
+    if (alarmOn != blowerAlarmOutput_) {
+      if (pcfIoService_.setOutput(0, alarmOn ? 1 : 0)) {
+        blowerAlarmOutput_ = alarmOn;
+      }
+    }
+  }
+
   if (verifierState != blowerCandidateState_) {
     blowerCandidateState_ = verifierState;
     blowerCandidateStartMs_ = millis();
   }
-
-  uint32_t delayMs = static_cast<uint32_t>(blowerNotifyDelaySec_) * 1000U;
   if (verifierState != blowerStableState_ &&
       millis() - blowerCandidateStartMs_ >= delayMs) {
     blowerStableState_ = verifierState;

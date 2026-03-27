@@ -5,7 +5,9 @@
 #include "services/console/pages/dashboard_script.h"
 #include "services/console/pages/console_fragment.h"
 #include "services/acquisition/analog_acquisition_service.h"
+#include <Wire.h>
 #include "comms/uart1_master/uart1_master.h"
+#include "services/pcf_io/pcf_io_service.h"
 
 ConsoleService* ConsoleService::active_ = nullptr;
 
@@ -134,6 +136,8 @@ void ConsoleService::begin() {
     payload += "\"state\":" + String(blowerState_ ? "true" : "false") + ",";
     payload += "\"belowThreshold\":" + String(blowerBelowThreshold_ ? "true" : "false");
     payload += ",";
+    payload += "\"alarmEnabled\":" + String(blowerAlarmEnabled_ ? "true" : "false");
+    payload += ",";
     payload += "\"delaySec\":" + String(blowerDelaySec_);
     payload += "}";
 
@@ -199,6 +203,28 @@ void ConsoleService::begin() {
       *blowerDelaySecRef_ = blowerDelaySec_;
     }
 
+    int idxAlarm = body.indexOf("alarmEnabled");
+    if (idxAlarm >= 0) {
+      int colon = body.indexOf(':', idxAlarm);
+      if (colon >= 0) {
+        int end = body.indexOf(',', colon);
+        if (end < 0) {
+          end = body.indexOf('}', colon);
+        }
+        if (end < 0) {
+          end = body.length();
+        }
+        String value = body.substring(colon + 1, end);
+        value.replace("\"", "");
+        value.trim();
+        int parsed = value.toInt();
+        blowerAlarmEnabled_ = parsed != 0;
+      }
+    }
+    if (blowerAlarmEnabledRef_) {
+      *blowerAlarmEnabledRef_ = blowerAlarmEnabled_;
+    }
+
     String payload;
     payload.reserve(128);
     payload += "{";
@@ -206,6 +232,8 @@ void ConsoleService::begin() {
     payload += "\"a1\":" + String(blowerThresholdA1_, 3);
     payload += ",";
     payload += "\"delaySec\":" + String(blowerDelaySec_);
+    payload += ",";
+    payload += "\"alarmEnabled\":" + String(blowerAlarmEnabled_ ? "true" : "false");
     payload += "}";
     server_.sendHeader("Cache-Control", "no-store, max-age=0");
     server_.send(200, "application/json", payload);
@@ -236,6 +264,109 @@ void ConsoleService::begin() {
       return;
     }
     server_.send(200, "application/json", "{\"ok\":true}");
+  });
+
+  server_.on("/api/pcf/state", HTTP_GET, [this]() {
+    if (!pcfIoService_) {
+      server_.send(200, "application/json", "{\"ok\":false,\"error\":\"NO_PCF\"}");
+      return;
+    }
+
+    uint8_t inputs[8] = {0};
+    uint8_t outputs[8] = {0};
+    bool inputOk = pcfIoService_->readInputs(inputs, 8);
+    bool outputOk = pcfIoService_->getOutputs(outputs, 8);
+    if (!inputOk || !outputOk) {
+      server_.send(200, "application/json", "{\"ok\":false,\"error\":\"READ_FAIL\"}");
+      return;
+    }
+
+    String payload;
+    payload.reserve(128);
+    payload += "{\"ok\":true,\"di\":[";
+    for (uint8_t i = 0; i < 8; ++i) {
+      payload += String(inputs[i]);
+      if (i < 7) {
+        payload += ",";
+      }
+    }
+    payload += "],\"do\":[";
+    for (uint8_t i = 0; i < 8; ++i) {
+      payload += String(outputs[i]);
+      if (i < 7) {
+        payload += ",";
+      }
+    }
+    payload += "]}";
+    server_.sendHeader("Cache-Control", "no-store, max-age=0");
+    server_.send(200, "application/json", payload);
+  });
+
+  server_.on("/api/pcf/do", HTTP_POST, [this]() {
+    if (!pcfIoService_) {
+      server_.send(200, "application/json", "{\"ok\":false,\"error\":\"NO_PCF\"}");
+      return;
+    }
+    String body = server_.arg("plain");
+
+    auto parseField = [&](const char* key, int current) -> int {
+      int idx = body.indexOf(key);
+      if (idx < 0) {
+        return current;
+      }
+      int colon = body.indexOf(':', idx);
+      if (colon < 0) {
+        return current;
+      }
+      int end = body.indexOf(',', colon);
+      if (end < 0) {
+        end = body.indexOf('}', colon);
+      }
+      if (end < 0) {
+        end = body.length();
+      }
+      String value = body.substring(colon + 1, end);
+      value.replace("\"", "");
+      value.trim();
+      return value.toInt();
+    };
+
+    int pin = parseField("pin", -1);
+    int value = parseField("value", -1);
+    if (pin < 0 || pin > 7 || (value != 0 && value != 1)) {
+      server_.send(200, "application/json", "{\"ok\":false,\"error\":\"BAD_ARG\"}");
+      return;
+    }
+
+    if (!pcfIoService_->setOutput(static_cast<uint8_t>(pin),
+                                  static_cast<uint8_t>(value))) {
+      server_.send(200, "application/json", "{\"ok\":false,\"error\":\"WRITE_FAIL\"}");
+      return;
+    }
+
+    server_.send(200, "application/json", "{\"ok\":true}");
+  });
+
+  server_.on("/api/i2c/scan", HTTP_GET, [this]() {
+    Wire.begin();
+    String payload;
+    payload.reserve(192);
+    payload += "{\"ok\":true,\"devices\":[";
+    bool first = true;
+    for (uint8_t addr = 0x03; addr <= 0x77; ++addr) {
+      Wire.beginTransmission(addr);
+      uint8_t err = Wire.endTransmission();
+      if (err == 0) {
+        if (!first) {
+          payload += ",";
+        }
+        payload += String(addr);
+        first = false;
+      }
+    }
+    payload += "]}";
+    server_.sendHeader("Cache-Control", "no-store, max-age=0");
+    server_.send(200, "application/json", payload);
   });
 
   server_.begin();
@@ -315,8 +446,19 @@ void ConsoleService::setBlowerDelayRef(uint16_t* seconds) {
   }
 }
 
+void ConsoleService::setBlowerAlarmRef(bool* enabled) {
+  blowerAlarmEnabledRef_ = enabled;
+  if (blowerAlarmEnabledRef_) {
+    blowerAlarmEnabled_ = *blowerAlarmEnabledRef_;
+  }
+}
+
 void ConsoleService::setUartMaster(Uart1Master* master) {
   uartMaster_ = master;
+}
+
+void ConsoleService::setPcfIoService(PcfIoService* service) {
+  pcfIoService_ = service;
 }
 
 void ConsoleService::setBlowerStatus(bool state, bool belowThreshold) {

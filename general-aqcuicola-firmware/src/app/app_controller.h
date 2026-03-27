@@ -11,6 +11,7 @@
 #include "services/telemetry/telemetry_service.h"
 #include "services/console/console_service.h"
 #include "comms/uart1_master/uart1_master.h"
+#include "services/pcf_io/pcf_io_service.h"
 
 class AppController {
  public:
@@ -34,6 +35,7 @@ class AppController {
   AnalogAcquisitionService analogService_;
   OtaModemService otaModemService_;
   Uart1Master uart1Master_;
+  PcfIoService pcfIoService_;
   DeviceStatus status_;
   AppState state_;
   float blowerThresholdA0_ = 0.3f;
@@ -44,4 +46,6 @@ class AppController {
   bool blowerStableState_ = false;
   bool blowerLastPublishedState_ = false;
   bool blowerHasPublished_ = false;
+  bool blowerAlarmEnabled_ = false;
+  bool blowerAlarmOutput_ = false;
 };

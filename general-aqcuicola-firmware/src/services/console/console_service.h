@@ -13,6 +13,7 @@
 
 class AnalogAcquisitionService;
 class Uart1Master;
+class PcfIoService;
 
 class ConsoleService {
  public:
@@ -27,7 +28,9 @@ class ConsoleService {
   void setBlowerThresholdRefs(float* a0, float* a1);
   void setBlowerStatus(bool state, bool belowThreshold);
   void setBlowerDelayRef(uint16_t* seconds);
+  void setBlowerAlarmRef(bool* enabled);
   void setUartMaster(Uart1Master* master);
+  void setPcfIoService(PcfIoService* service);
 
   static void setActive(ConsoleService* service);
   static void logSink(const char* line);
@@ -55,9 +58,12 @@ class ConsoleService {
   float* blowerThresholdA1Ref_ = nullptr;
   uint16_t blowerDelaySec_ = 10;
   uint16_t* blowerDelaySecRef_ = nullptr;
+  bool blowerAlarmEnabled_ = false;
+  bool* blowerAlarmEnabledRef_ = nullptr;
   bool blowerState_ = false;
   bool blowerBelowThreshold_ = false;
   Uart1Master* uartMaster_ = nullptr;
+  PcfIoService* pcfIoService_ = nullptr;
 
   static ConsoleService* active_;
 };
