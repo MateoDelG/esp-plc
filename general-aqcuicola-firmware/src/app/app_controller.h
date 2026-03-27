@@ -7,6 +7,7 @@
 #include "models/device_status.h"
 #include "services/acquisition/analog_acquisition_service.h"
 #include "services/ota/ota_service.h"
+#include "services/ota_modem/ota_modem_service.h"
 #include "services/telemetry/telemetry_service.h"
 #include "services/console/console_service.h"
 
@@ -30,6 +31,7 @@ class AppController {
   TelemetryService telemetryService_;
   ConsoleService consoleService_;
   AnalogAcquisitionService analogService_;
+  OtaModemService otaModemService_;
   DeviceStatus status_;
   AppState state_;
   float blowerThresholdA0_ = 0.3f;

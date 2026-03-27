@@ -92,6 +92,10 @@ void UbidotsService::update() {
 }
 
 bool UbidotsService::publishTelemetry(const TelemetryPacket& data) {
+  if (otaActive_) {
+    lastPublishOk_ = false;
+    return false;
+  }
   if (publishDisabled_) {
     if (!publishDisabledLogged_) {
       logger_.warn("ubidots: publish disabled (test)");
@@ -125,6 +129,9 @@ bool UbidotsService::publishTelemetry(const TelemetryPacket& data) {
 }
 
 bool UbidotsService::publishBlowersState(uint8_t value) {
+  if (otaActive_) {
+    return false;
+  }
   if (publishDisabled_) {
     if (!publishDisabledLogged_) {
       logger_.warn("ubidots: publish disabled (test)");
@@ -155,6 +162,9 @@ bool UbidotsService::publishBlowersState(uint8_t value) {
 }
 
 bool UbidotsService::publishConsoleValue(uint16_t value) {
+  if (otaActive_ && value != 200 && value != 299) {
+    return false;
+  }
   if (publishDisabled_) {
     if (!publishDisabledLogged_) {
       logger_.warn("ubidots: publish disabled (test)");
@@ -545,6 +555,14 @@ bool UbidotsService::isOtaMode() const {
   return otaMode_;
 }
 
+void UbidotsService::setOtaActive(bool active) {
+  otaActive_ = active;
+}
+
+bool UbidotsService::isOtaActive() const {
+  return otaActive_;
+}
+
 void UbidotsService::rxTaskLoop() {
   String consoleTopic = ubidotsConsoleTopic();
   const uint8_t kBurstMax = 6;
@@ -601,6 +619,10 @@ void UbidotsService::rxTaskLoop() {
   };
 
   for (;;) {
+    if (rxPaused_) {
+      vTaskDelay(pdMS_TO_TICKS(250));
+      continue;
+    }
     if (otaMode_ || !modemReady_ || !dataReady_ || !isConnected()) {
       vTaskDelay(pdMS_TO_TICKS(200));
       continue;
@@ -709,5 +731,14 @@ void UbidotsService::rxTaskLoop() {
     }
 
     vTaskDelay(pdMS_TO_TICKS(20));
+  }
+}
+
+void UbidotsService::setRxPaused(bool paused) {
+  rxPaused_ = paused;
+  if (paused) {
+    logger_.info("ubidots: rx paused");
+  } else {
+    logger_.info("ubidots: rx resumed");
   }
 }

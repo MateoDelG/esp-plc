@@ -23,10 +23,13 @@ class UbidotsService {
   bool publishConsoleValue(uint16_t value);
   void setOtaMode(bool enabled);
   bool isOtaMode() const;
+  void setOtaActive(bool active);
+  bool isOtaActive() const;
   uint8_t drainIncoming(uint8_t maxMessages, uint32_t maxMs);
   bool hasPendingConsoleMessage() const;
   bool popConsoleMessage(ConsoleMessage& out);
   uint8_t pendingConsoleCount() const;
+  void setRxPaused(bool paused);
   bool isConnected() const;
   ModemManager& modem();
   bool isConsoleSubscribed() const;
@@ -52,6 +55,7 @@ class UbidotsService {
   volatile bool lastPublishOk_ = false;
   volatile bool mqttBusy_ = false;
   volatile bool otaMode_ = false;
+  volatile bool otaActive_ = false;
   static constexpr uint8_t kConsoleQueueSize = 32;
   ConsoleMessage consoleQueue_[kConsoleQueueSize];
   uint8_t consoleHead_ = 0;
@@ -65,6 +69,7 @@ class UbidotsService {
   TaskHandle_t modemTask_ = nullptr;
   TaskHandle_t rxTask_ = nullptr;
   volatile bool rxTaskActive_ = false;
+  volatile bool rxPaused_ = false;
   SemaphoreHandle_t mqttMutex_ = nullptr;
 
   static void modemTaskEntry(void* param);

@@ -12,6 +12,7 @@ AppController::AppController()
     telemetryService_(logger_, ubidotsService_),
     consoleService_(),
     analogService_(logger_),
+    otaModemService_(logger_),
     status_(),
     state_(AppState::Boot) {}
 
@@ -58,10 +59,13 @@ void AppController::begin() {
     logger_.info("ubidots: task started");
   }
 
+  otaModemService_.setModem(&ubidotsService_.modem());
+  otaModemService_.setUbidots(&ubidotsService_);
+
   telemetryService_.begin();
   analogService_.begin();
   setState(AppState::Running);
-  logger_.info("version: 1.08");
+  logger_.info("version: 1.09");
 
 }
 
@@ -156,7 +160,9 @@ void AppController::update() {
       logger_.logf("console", "console payload: %s", payload.c_str());
       logger_.logf("console", "console value: %.3f -> %d", raw, command);
       if (command == 101) {
-        ubidotsService_.publishConsoleValue(200);
+        if (!otaModemService_.start()) {
+          logger_.warn("ota-modem: already running");
+        }
       }
     }
   }

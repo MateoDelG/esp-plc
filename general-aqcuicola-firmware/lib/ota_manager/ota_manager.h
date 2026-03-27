@@ -11,7 +11,9 @@ class OtaManager {
 
   void begin();
   void handle();
-  bool installFromSd(const char* path);
+  using OtaStageCallback = void (*)(void* context);
+  bool installFromSd(const char* path, OtaStageCallback afterWriteCb = nullptr,
+                     void* context = nullptr);
 
  private:
   void logLine(const String& line);

@@ -5,7 +5,8 @@
 
 void OtaManager::begin() {}
 
-bool OtaManager::installFromSd(const char* path) {
+bool OtaManager::installFromSd(const char* path, OtaStageCallback afterWriteCb,
+                               void* context) {
   File file = SD.open(path, FILE_READ);
   if (!file) {
     return false;
@@ -33,6 +34,10 @@ bool OtaManager::installFromSd(const char* path) {
       Update.abort();
       return false;
     }
+  }
+
+  if (afterWriteCb) {
+    afterWriteCb(context);
   }
 
   bool ok = Update.end(true);

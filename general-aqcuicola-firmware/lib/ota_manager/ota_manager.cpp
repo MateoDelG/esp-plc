@@ -42,7 +42,8 @@ void OtaManager::begin() {
 
 void OtaManager::handle() { ArduinoOTA.handle(); }
 
-bool OtaManager::installFromSd(const char* path) {
+bool OtaManager::installFromSd(const char* path, OtaStageCallback afterWriteCb,
+                               void* context) {
   logLine("[ota] install start");
   logLine("[ota] ota partition required");
 
@@ -143,6 +144,10 @@ bool OtaManager::installFromSd(const char* path) {
     file.close();
     logLine("[ota] install failed");
     return false;
+  }
+
+  if (afterWriteCb) {
+    afterWriteCb(context);
   }
 
   if (!Update.end(true)) {

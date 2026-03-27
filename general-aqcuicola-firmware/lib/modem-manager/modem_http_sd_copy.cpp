@@ -33,14 +33,10 @@ bool httpCopyModemFileToSd(ModemManager& modem, const char* filename,
       modem.logInfo("http", line);
     }
   };
+  (void)fsFlushThreshold;
   logLine("copying modem file to SD");
   logLine(String("requested chunk: ") + fsReadChunkSize);
-  size_t flushThreshold = fsFlushThreshold;
-  if (flushThreshold == 0) {
-    logLine("flush threshold: 0 (final flush only)");
-  } else {
-    logLine(String("flush threshold: ") + flushThreshold);
-  }
+  logLine("flush threshold: final flush only");
 
   String tempPath = String(sdPath) + ".part";
   const char* sdTempPath = tempPath.c_str();
@@ -110,7 +106,6 @@ bool httpCopyModemFileToSd(ModemManager& modem, const char* filename,
   const int openHandle = handle;
   int remaining = expectedSize;
   size_t totalWritten = 0;
-  size_t sinceFlush = 0;
   size_t sinceProgress = 0;
   uint8_t buffer[kFsReadChunkMax];
 
@@ -200,7 +195,6 @@ bool httpCopyModemFileToSd(ModemManager& modem, const char* filename,
       logLine(String("write requested: ") + dataLen);
       logLine(String("write actual: ") + writeCount);
       logLine(String("totalWritten: ") + totalWritten);
-      logLine(String("sinceFlush: ") + sinceFlush);
       logLine(String("expected size: ") + expectedSize);
       sdFailed = true;
       logLine("aborting copy path immediately");
@@ -232,42 +226,11 @@ bool httpCopyModemFileToSd(ModemManager& modem, const char* filename,
       return false;
     }
     remaining -= dataLen;
-    sinceFlush += static_cast<size_t>(dataLen);
     totalWritten += static_cast<size_t>(dataLen);
     sinceProgress += static_cast<size_t>(dataLen);
     if (sinceProgress >= kFsProgressStep) {
       logLine(String("copied ") + totalWritten + " / " + expectedSize);
       sinceProgress = 0;
-    }
-    if (flushThreshold > 0 && sinceFlush >= flushThreshold) {
-      logLine(String("flush start, bytesSinceFlush=") + sinceFlush +
-              ", totalWritten=" + totalWritten);
-      out.flush();
-      size_t posAfter = out.position();
-      logLine(String("flush done, position=") + posAfter);
-      if (posAfter != totalWritten) {
-        logLine("first SD write failure detected");
-        logLine("fail: flush position mismatch");
-        sdFailed = true;
-        logLine("aborting copy path immediately");
-        out.close();
-        restoreLogging();
-        logLine(String("close handle: ") + openHandle);
-        fsClose(modem, openHandle);
-        logLine("temp cleanup deferred until recovery");
-        bool remountOk = false;
-        if (sdRecoverFn) {
-          logLine("remount after flush mismatch");
-          remountOk = sdRecoverFn();
-          logLine(String("remount ") + (remountOk ? "ok" : "fail"));
-        }
-        if (remountOk) {
-          cleanupTemp(true);
-        }
-        logLine("copy aborted");
-        return false;
-      }
-      sinceFlush = 0;
     }
     restoreLogging();
   }
