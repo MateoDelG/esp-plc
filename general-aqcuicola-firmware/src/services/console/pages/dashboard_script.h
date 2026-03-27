@@ -13,6 +13,9 @@ static const char kDashboardScript[] =
   "var thrA1=document.getElementById('thr-a1');"
   "var thrApply=document.getElementById('thr-apply');"
   "var thrDelay=document.getElementById('thr-delay');"
+  "var uartGetStatus=document.getElementById('uart-get-status');"
+  "var uartGetLast=document.getElementById('uart-get-last');"
+  "var uartAuto=document.getElementById('uart-auto');"
   "var isEditingA0=false;var isEditingA1=false;var isEditingDelay=false;"
   "var a0Volts=document.getElementById('a0-volts');"
   "var a1Volts=document.getElementById('a1-volts');"
@@ -130,6 +133,13 @@ static const char kDashboardScript[] =
   "});"
   "}"
 
+  "function sendUart(op){"
+  "fetch('/api/uart/cmd?op='+encodeURIComponent(op),{method:'POST'})"
+  ".then(function(r){return r.json();})"
+  ".then(function(d){if(!d||!d.ok){consoleEl.textContent+='UART error\\n';}})"
+  ".catch(function(){consoleEl.textContent+='UART error\\n';});"
+  "}"
+
   "var ws=new WebSocket('ws://'+location.hostname+':81/');"
   "ws.onopen=function(){consoleStatus.textContent='connected';};"
   "ws.onerror=function(){consoleStatus.textContent='error';};"
@@ -148,4 +158,7 @@ static const char kDashboardScript[] =
   "if(thrDelay){thrDelay.addEventListener('focus',function(){isEditingDelay=true;});"
   "thrDelay.addEventListener('blur',function(){isEditingDelay=false;});}"
   "if(thrApply){thrApply.addEventListener('click',postBlowers);}"
+  "if(uartGetStatus){uartGetStatus.addEventListener('click',function(){sendUart('get_status');});}"
+  "if(uartGetLast){uartGetLast.addEventListener('click',function(){sendUart('get_last');});}"
+  "if(uartAuto){uartAuto.addEventListener('click',function(){sendUart('auto_measure');});}"
   "</script>";

@@ -5,6 +5,7 @@
 #include "services/console/pages/dashboard_script.h"
 #include "services/console/pages/console_fragment.h"
 #include "services/acquisition/analog_acquisition_service.h"
+#include "comms/uart1_master/uart1_master.h"
 
 ConsoleService* ConsoleService::active_ = nullptr;
 
@@ -210,6 +211,33 @@ void ConsoleService::begin() {
     server_.send(200, "application/json", payload);
   });
 
+  server_.on("/api/uart/cmd", HTTP_POST, [this]() {
+    String op = server_.arg("op");
+    op.trim();
+    if (!uartMaster_) {
+      server_.send(200, "application/json", "{\"ok\":false,\"error\":\"NO_UART\"}");
+      return;
+    }
+    Uart1Master::Op cmd;
+    if (op == "get_status") {
+      cmd = Uart1Master::Op::GetStatus;
+    } else if (op == "get_last") {
+      cmd = Uart1Master::Op::GetLast;
+    } else if (op == "auto_measure") {
+      cmd = Uart1Master::Op::AutoMeasure;
+    } else {
+      server_.send(200, "application/json", "{\"ok\":false,\"error\":\"BAD_OP\"}");
+      return;
+    }
+
+    bool queued = uartMaster_->enqueue(cmd);
+    if (!queued) {
+      server_.send(200, "application/json", "{\"ok\":false,\"error\":\"BUSY\"}");
+      return;
+    }
+    server_.send(200, "application/json", "{\"ok\":true}");
+  });
+
   server_.begin();
 
   ws_.begin();
@@ -285,6 +313,10 @@ void ConsoleService::setBlowerDelayRef(uint16_t* seconds) {
   if (blowerDelaySecRef_) {
     blowerDelaySec_ = *blowerDelaySecRef_;
   }
+}
+
+void ConsoleService::setUartMaster(Uart1Master* master) {
+  uartMaster_ = master;
 }
 
 void ConsoleService::setBlowerStatus(bool state, bool belowThreshold) {

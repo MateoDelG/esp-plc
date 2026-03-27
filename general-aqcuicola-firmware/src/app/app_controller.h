@@ -10,6 +10,7 @@
 #include "services/ota_modem/ota_modem_service.h"
 #include "services/telemetry/telemetry_service.h"
 #include "services/console/console_service.h"
+#include "comms/uart1_master/uart1_master.h"
 
 class AppController {
  public:
@@ -32,6 +33,7 @@ class AppController {
   ConsoleService consoleService_;
   AnalogAcquisitionService analogService_;
   OtaModemService otaModemService_;
+  Uart1Master uart1Master_;
   DeviceStatus status_;
   AppState state_;
   float blowerThresholdA0_ = 0.3f;

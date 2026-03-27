@@ -6,6 +6,8 @@ class LogBuffer {
  public:
   explicit LogBuffer(size_t capacity);
 
+  static constexpr size_t kLineMax = 512;
+
   void push(const String& line);
   size_t size() const;
   String get(size_t index) const;

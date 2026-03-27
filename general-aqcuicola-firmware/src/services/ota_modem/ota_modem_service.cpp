@@ -2,6 +2,7 @@
 
 #include <Update.h>
 
+#include "config/ota_modem_codes.h"
 #include "modem_http_storage.h"
 
 OtaModemService* OtaModemService::active_ = nullptr;
@@ -53,7 +54,7 @@ void OtaModemService::taskLoop() {
     }
     failReported = true;
     if (ubidots_) {
-      ubidots_->publishConsoleValue(299);
+      ubidots_->publishConsoleValue(kOtaFailCode);
     }
     logger_.warn("ota-modem: publish fail code 299");
   };
@@ -127,7 +128,7 @@ void OtaModemService::taskLoop() {
   if (installed) {
     logger_.info("ota-modem: install ok");
     if (ubidots_) {
-      ubidots_->publishConsoleValue(kOtaConsoleBeforeReboot);
+      ubidots_->publishConsoleValue(kOtaSuccessCode);
     }
     delay(300);
     ESP.restart();

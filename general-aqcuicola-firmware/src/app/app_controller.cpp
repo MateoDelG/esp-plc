@@ -1,6 +1,7 @@
 #include "app/app_controller.h"
 
 #include "config/app_config.h"
+#include "config/ota_modem_codes.h"
 
 #include <cmath>
 
@@ -13,6 +14,7 @@ AppController::AppController()
     consoleService_(),
     analogService_(logger_),
     otaModemService_(logger_),
+    uart1Master_(logger_),
     status_(),
     state_(AppState::Boot) {}
 
@@ -38,6 +40,7 @@ void AppController::begin() {
   consoleService_.setAnalogControl(&analogService_);
   consoleService_.setBlowerThresholdRefs(&blowerThresholdA0_, &blowerThresholdA1_);
   consoleService_.setBlowerDelayRef(&blowerNotifyDelaySec_);
+  consoleService_.setUartMaster(&uart1Master_);
   logger_.info("console: ready");
 
   setState(AppState::WifiReady);
@@ -64,6 +67,7 @@ void AppController::begin() {
 
   telemetryService_.begin();
   analogService_.begin();
+  uart1Master_.begin();
   setState(AppState::Running);
   logger_.info("version: 1.10");
 
@@ -159,7 +163,7 @@ void AppController::update() {
       int command = static_cast<int>(roundf(raw));
       logger_.logf("console", "console payload: %s", payload.c_str());
       logger_.logf("console", "console value: %.3f -> %d", raw, command);
-      if (command == 101) {
+      if (command == kOtaTriggerCode) {
         if (!otaModemService_.start()) {
           logger_.warn("ota-modem: already running");
         }

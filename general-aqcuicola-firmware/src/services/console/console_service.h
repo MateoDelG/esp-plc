@@ -12,6 +12,7 @@
 #include "models/telemetry_packet.h"
 
 class AnalogAcquisitionService;
+class Uart1Master;
 
 class ConsoleService {
  public:
@@ -26,6 +27,7 @@ class ConsoleService {
   void setBlowerThresholdRefs(float* a0, float* a1);
   void setBlowerStatus(bool state, bool belowThreshold);
   void setBlowerDelayRef(uint16_t* seconds);
+  void setUartMaster(Uart1Master* master);
 
   static void setActive(ConsoleService* service);
   static void logSink(const char* line);
@@ -38,7 +40,7 @@ class ConsoleService {
   static constexpr uint16_t kHttpPort = 80;
   static constexpr uint16_t kWsPort = 81;
   static constexpr size_t kQueueDepth = 64;
-  static constexpr size_t kMaxLineLen = 256;
+  static constexpr size_t kMaxLineLen = LogBuffer::kLineMax;
 
   WebServer server_;
   WebSocketsServer ws_;
@@ -55,6 +57,7 @@ class ConsoleService {
   uint16_t* blowerDelaySecRef_ = nullptr;
   bool blowerState_ = false;
   bool blowerBelowThreshold_ = false;
+  Uart1Master* uartMaster_ = nullptr;
 
   static ConsoleService* active_;
 };

@@ -3,6 +3,7 @@
 #include "comms/ubidots/ubidots_payload_builder.h"
 #include "config/modem_config.h"
 #include "config/ubidots_config.h"
+#include "config/ota_modem_codes.h"
 #include "modem_parsers.h"
 
 #ifndef UBIDOTS_RX_DEBUG
@@ -162,7 +163,7 @@ bool UbidotsService::publishBlowersState(uint8_t value) {
 }
 
 bool UbidotsService::publishConsoleValue(uint16_t value) {
-  if (otaActive_ && value != 200 && value != 299) {
+  if (otaActive_ && value != kOtaSuccessCode && value != kOtaFailCode) {
     return false;
   }
   if (publishDisabled_) {
