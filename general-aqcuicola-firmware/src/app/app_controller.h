@@ -32,4 +32,12 @@ class AppController {
   AnalogAcquisitionService analogService_;
   DeviceStatus status_;
   AppState state_;
+  float blowerThresholdA0_ = 0.3f;
+  float blowerThresholdA1_ = 0.3f;
+  uint16_t blowerNotifyDelaySec_ = 10;
+  bool blowerCandidateState_ = false;
+  uint32_t blowerCandidateStartMs_ = 0;
+  bool blowerStableState_ = false;
+  bool blowerLastPublishedState_ = false;
+  bool blowerHasPublished_ = false;
 };

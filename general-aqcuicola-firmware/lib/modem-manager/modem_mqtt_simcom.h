@@ -33,12 +33,25 @@ class SimcomMqttClient : public IModemMqtt {
                      const char* pass, bool useTls);
   void resetService();
 
+  enum class RxState : uint8_t {
+    Idle = 0,
+    StartSeen,
+    TopicRead,
+    PayloadRead,
+  };
+
   ModemManager& modem_;
   bool started_ = false;
   bool acquired_ = false;
   bool connected_ = false;
   bool tlsConfigured_ = false;
   bool needsReset_ = false;
+  RxState rxState_ = RxState::Idle;
+  uint16_t rxTopicLen_ = 0;
+  uint16_t rxPayloadLen_ = 0;
+  String rxTopic_;
+  String rxPayload_;
+  uint32_t rxStageStartMs_ = 0;
 };
 
 #endif

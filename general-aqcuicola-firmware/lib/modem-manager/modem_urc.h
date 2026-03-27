@@ -37,12 +37,15 @@ class UrcStore {
   void pushFromResponse(const String& response);
 
   bool pop(UrcType type, String& lineOut);
+  bool has(UrcType type) const;
+  uint32_t overflowCount() const;
 
  private:
-  static const size_t kMaxEvents = 16;
+  static const size_t kMaxEvents = 48;
   UrcEvent events_[kMaxEvents];
   size_t head_ = 0;
   size_t count_ = 0;
+  uint32_t overflowCount_ = 0;
 };
 
 #endif

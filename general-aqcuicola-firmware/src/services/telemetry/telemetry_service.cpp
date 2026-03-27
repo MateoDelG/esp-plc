@@ -10,7 +10,9 @@ void TelemetryService::begin() {
 }
 
 void TelemetryService::update() {
-  ubidots_.update();
+  if (ubidots_.isOtaMode()) {
+    return;
+  }
 
   uint32_t now = millis();
   if (now - lastPublishMs_ < kUbiPublishIntervalMs) {

@@ -60,6 +60,7 @@ void UrcStore::push(const String& line) {
     ++count_;
   } else {
     head_ = (head_ + 1) % kMaxEvents;
+    ++overflowCount_;
   }
 }
 
@@ -109,4 +110,21 @@ bool UrcStore::pop(UrcType type, String& lineOut) {
   }
 
   return false;
+}
+
+bool UrcStore::has(UrcType type) const {
+  if (count_ == 0) {
+    return false;
+  }
+  for (size_t i = 0; i < count_; ++i) {
+    size_t index = (head_ + i) % kMaxEvents;
+    if (events_[index].type == type) {
+      return true;
+    }
+  }
+  return false;
+}
+
+uint32_t UrcStore::overflowCount() const {
+  return overflowCount_;
 }

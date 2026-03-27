@@ -4,10 +4,70 @@
 #include "modem_parsers.h"
 #include "modem_retry.h"
 
+#ifndef UBIDOTS_RX_DEBUG
+#define UBIDOTS_RX_DEBUG 0
+#endif
+
+static const uint32_t kMqttRxStageTimeoutMs = 2500;
+static const uint8_t kRxBurstLines = 8;
+static const uint32_t kRxBurstBudgetMs = 20;
+
 SimcomMqttClient::SimcomMqttClient(ModemManager& modem) : modem_(modem) {}
 
 static bool isMqttOkCode(int code) {
   return code == 0 || code == 11 || code == 14 || code == 19 || code == 20;
+}
+
+static bool readFilteredPayload(ModemManager& modem, size_t length,
+                                String& out, uint32_t timeoutMs) {
+  out = "";
+  out.reserve(length + 4);
+  uint32_t startMs = millis();
+  Stream& stream = modem.tapStream();
+  while (out.length() < length && millis() - startMs < timeoutMs) {
+    if (!stream.available()) {
+      modem.idle(5);
+      continue;
+    }
+    char c = static_cast<char>(stream.read());
+    if (c == '\r' || c == '\n') {
+      continue;
+    }
+    if (c == '+') {
+      while (millis() - startMs < timeoutMs) {
+        if (!stream.available()) {
+          modem.idle(5);
+          continue;
+        }
+        char drop = static_cast<char>(stream.read());
+        if (drop == '\n') {
+          break;
+        }
+      }
+      continue;
+    }
+    out += c;
+  }
+  return out.length() == length;
+}
+
+static void drainUrcBurst(ModemManager& modem) {
+  uint32_t startMs = millis();
+  uint8_t lines = 0;
+  while (lines < kRxBurstLines && millis() - startMs < kRxBurstBudgetMs) {
+    String line;
+    if (!modem.at().readLineNonBlocking(line)) {
+      break;
+    }
+    if (line.length() == 0) {
+      continue;
+    }
+    UrcType type = UrcStore::classify(line);
+    if (type != UrcType::None) {
+      modem.urc().push(line);
+      ++lines;
+    }
+  }
 }
 
 void SimcomMqttClient::resetService() {
@@ -370,54 +430,100 @@ bool SimcomMqttClient::pollIncoming(String& topicOut, String& payloadOut) {
   topicOut = "";
   payloadOut = "";
 
-  String urcLine;
-  if (!modem_.urc().pop(UrcType::MqttRxStart, urcLine)) {
-    String line;
-    if (!modem_.at().readLineNonBlocking(line)) {
-      return false;
-    }
-    UrcType found = UrcStore::classify(line);
-    if (found != UrcType::MqttRxStart) {
-      if (found != UrcType::None) {
-        modem_.urc().push(line);
+  drainUrcBurst(modem_);
+
+  auto resetState = [&]() {
+    rxState_ = RxState::Idle;
+    rxTopicLen_ = 0;
+    rxPayloadLen_ = 0;
+    rxTopic_ = "";
+    rxPayload_ = "";
+    rxStageStartMs_ = 0;
+  };
+
+  if (rxState_ != RxState::Idle &&
+      millis() - rxStageStartMs_ > kMqttRxStageTimeoutMs) {
+    modem_.logWarn("mqtt", "rx stage timeout");
+    resetState();
+    return false;
+  }
+
+  for (uint8_t guard = 0; guard < 4; ++guard) {
+    switch (rxState_) {
+      case RxState::Idle: {
+        String line;
+        if (!modem_.urc().pop(UrcType::MqttRxStart, line)) {
+          return false;
+        }
+        uint16_t topicLen = 0;
+        uint16_t payloadLen = 0;
+        if (!ModemParsers::parseRxStart(line, topicLen, payloadLen) ||
+            topicLen == 0 || payloadLen == 0) {
+          modem_.logWarn("mqtt", "rxstart parse failed: " + line);
+          resetState();
+          return false;
+        }
+        rxTopicLen_ = topicLen;
+        rxPayloadLen_ = payloadLen;
+        rxStageStartMs_ = millis();
+        rxState_ = RxState::StartSeen;
+        continue;
       }
-      return false;
+      case RxState::StartSeen: {
+        String line;
+        if (!modem_.urc().pop(UrcType::MqttRxTopic, line)) {
+          return false;
+        }
+        if (!modem_.at().readExact(rxTopicLen_, rxTopic_, 5000)) {
+          modem_.logWarn("mqtt", "rxtopic read failed");
+          resetState();
+          return false;
+        }
+        rxStageStartMs_ = millis();
+        rxState_ = RxState::TopicRead;
+        continue;
+      }
+      case RxState::TopicRead: {
+        String line;
+        if (!modem_.urc().pop(UrcType::MqttRxPayload, line)) {
+          return false;
+        }
+        if (!readFilteredPayload(modem_, rxPayloadLen_, rxPayload_, 5000)) {
+          modem_.logWarn("mqtt", "rxpayload read failed");
+          resetState();
+          return false;
+        }
+        rxStageStartMs_ = millis();
+        rxState_ = RxState::PayloadRead;
+        continue;
+      }
+      case RxState::PayloadRead: {
+        String line;
+        if (!modem_.urc().pop(UrcType::MqttRxEnd, line)) {
+          return false;
+        }
+        topicOut = rxTopic_;
+        payloadOut = rxPayload_;
+        resetState();
+
+        while (modem_.tapStream().available()) {
+          char t = static_cast<char>(modem_.tapStream().peek());
+          if (t == '\r' || t == '\n') {
+            modem_.tapStream().read();
+          } else {
+            break;
+          }
+        }
+
+        return true;
+      }
+      default:
+        resetState();
+        return false;
     }
-    urcLine = line;
   }
 
-  uint16_t topicLen = 0;
-  uint16_t payloadLen = 0;
-  if (!ModemParsers::parseRxStart(urcLine, topicLen, payloadLen)) {
-    return false;
-  }
-
-  if (!modem_.at().waitUrc(UrcType::MqttRxTopic, 5000UL, urcLine)) {
-    return false;
-  }
-  if (!modem_.at().readExact(topicLen, topicOut, 5000)) {
-    return false;
-  }
-
-  if (!modem_.at().waitUrc(UrcType::MqttRxPayload, 5000UL, urcLine)) {
-    return false;
-  }
-  if (!modem_.at().readExact(payloadLen, payloadOut, 5000)) {
-    return false;
-  }
-
-  modem_.at().waitUrc(UrcType::MqttRxEnd, 2000UL, urcLine);
-
-  while (modem_.tapStream().available()) {
-    char t = static_cast<char>(modem_.tapStream().peek());
-    if (t == '\r' || t == '\n') {
-      modem_.tapStream().read();
-    } else {
-      break;
-    }
-  }
-
-  return true;
+  return false;
 }
 
 void SimcomMqttClient::disconnect() {

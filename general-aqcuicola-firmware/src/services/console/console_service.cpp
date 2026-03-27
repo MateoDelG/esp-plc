@@ -108,6 +108,108 @@ void ConsoleService::begin() {
     server_.send(200, "application/json", payload);
   });
 
+  server_.on("/api/blowers", HTTP_GET, [this]() {
+    bool a0Enabled = (latestAnalog_.enabledMask & 0x01) != 0;
+    bool a1Enabled = (latestAnalog_.enabledMask & 0x02) != 0;
+    const AnalogChannelReading& ch0 = latestAnalog_.channels[0];
+    const AnalogChannelReading& ch1 = latestAnalog_.channels[1];
+
+    bool a0Valid = a0Enabled && ch0.valid;
+    bool a1Valid = a1Enabled && ch1.valid;
+
+    String payload;
+    payload.reserve(192);
+    payload += "{";
+    payload += "\"a0\":{";
+    payload += "\"volts\":" + String(a0Valid ? ch0.volts : 0.0f, 3) + ",";
+    payload += "\"threshold\":" + String(blowerThresholdA0_, 3) + ",";
+    payload += "\"valid\":" + String(a0Valid ? "true" : "false");
+    payload += "},";
+    payload += "\"a1\":{";
+    payload += "\"volts\":" + String(a1Valid ? ch1.volts : 0.0f, 3) + ",";
+    payload += "\"threshold\":" + String(blowerThresholdA1_, 3) + ",";
+    payload += "\"valid\":" + String(a1Valid ? "true" : "false");
+    payload += "},";
+    payload += "\"state\":" + String(blowerState_ ? "true" : "false") + ",";
+    payload += "\"belowThreshold\":" + String(blowerBelowThreshold_ ? "true" : "false");
+    payload += ",";
+    payload += "\"delaySec\":" + String(blowerDelaySec_);
+    payload += "}";
+
+    server_.sendHeader("Cache-Control", "no-store, max-age=0");
+    server_.send(200, "application/json", payload);
+  });
+
+  server_.on("/api/blowers", HTTP_POST, [this]() {
+    String body = server_.arg("plain");
+
+    auto parseField = [&](const char* key, float current) -> float {
+      int idx = body.indexOf(key);
+      if (idx < 0) {
+        return current;
+      }
+      int colon = body.indexOf(':', idx);
+      if (colon < 0) {
+        return current;
+      }
+      int end = body.indexOf(',', colon);
+      if (end < 0) {
+        end = body.indexOf('}', colon);
+      }
+      if (end < 0) {
+        end = body.length();
+      }
+      String value = body.substring(colon + 1, end);
+      value.replace("\"", "");
+      value.trim();
+      return value.toFloat();
+    };
+
+    blowerThresholdA0_ = parseField("a0", blowerThresholdA0_);
+    blowerThresholdA1_ = parseField("a1", blowerThresholdA1_);
+    int idxDelay = body.indexOf("delaySec");
+    if (idxDelay >= 0) {
+      int colon = body.indexOf(':', idxDelay);
+      if (colon >= 0) {
+        int end = body.indexOf(',', colon);
+        if (end < 0) {
+          end = body.indexOf('}', colon);
+        }
+        if (end < 0) {
+          end = body.length();
+        }
+        String value = body.substring(colon + 1, end);
+        value.replace("\"", "");
+        value.trim();
+        int parsed = value.toInt();
+        if (parsed >= 1 && parsed <= 600) {
+          blowerDelaySec_ = static_cast<uint16_t>(parsed);
+        }
+      }
+    }
+
+    if (blowerThresholdA0Ref_) {
+      *blowerThresholdA0Ref_ = blowerThresholdA0_;
+    }
+    if (blowerThresholdA1Ref_) {
+      *blowerThresholdA1Ref_ = blowerThresholdA1_;
+    }
+    if (blowerDelaySecRef_) {
+      *blowerDelaySecRef_ = blowerDelaySec_;
+    }
+
+    String payload;
+    payload.reserve(128);
+    payload += "{";
+    payload += "\"a0\":" + String(blowerThresholdA0_, 3) + ",";
+    payload += "\"a1\":" + String(blowerThresholdA1_, 3);
+    payload += ",";
+    payload += "\"delaySec\":" + String(blowerDelaySec_);
+    payload += "}";
+    server_.sendHeader("Cache-Control", "no-store, max-age=0");
+    server_.send(200, "application/json", payload);
+  });
+
   server_.begin();
 
   ws_.begin();
@@ -165,6 +267,29 @@ void ConsoleService::setAnalogSnapshot(const AnalogSnapshot& snapshot) {
 
 void ConsoleService::setAnalogControl(AnalogAcquisitionService* service) {
   analogService_ = service;
+}
+
+void ConsoleService::setBlowerThresholdRefs(float* a0, float* a1) {
+  blowerThresholdA0Ref_ = a0;
+  blowerThresholdA1Ref_ = a1;
+  if (blowerThresholdA0Ref_) {
+    blowerThresholdA0_ = *blowerThresholdA0Ref_;
+  }
+  if (blowerThresholdA1Ref_) {
+    blowerThresholdA1_ = *blowerThresholdA1Ref_;
+  }
+}
+
+void ConsoleService::setBlowerDelayRef(uint16_t* seconds) {
+  blowerDelaySecRef_ = seconds;
+  if (blowerDelaySecRef_) {
+    blowerDelaySec_ = *blowerDelaySecRef_;
+  }
+}
+
+void ConsoleService::setBlowerStatus(bool state, bool belowThreshold) {
+  blowerState_ = state;
+  blowerBelowThreshold_ = belowThreshold;
 }
 
 void ConsoleService::setActive(ConsoleService* service) {

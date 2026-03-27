@@ -23,6 +23,9 @@ class ConsoleService {
   void setTelemetry(const TelemetryPacket& data);
   void setAnalogSnapshot(const AnalogSnapshot& snapshot);
   void setAnalogControl(AnalogAcquisitionService* service);
+  void setBlowerThresholdRefs(float* a0, float* a1);
+  void setBlowerStatus(bool state, bool belowThreshold);
+  void setBlowerDelayRef(uint16_t* seconds);
 
   static void setActive(ConsoleService* service);
   static void logSink(const char* line);
@@ -44,6 +47,14 @@ class ConsoleService {
   TelemetryPacket latestTelemetry_;
   AnalogSnapshot latestAnalog_;
   AnalogAcquisitionService* analogService_ = nullptr;
+  float blowerThresholdA0_ = 0.3f;
+  float blowerThresholdA1_ = 0.3f;
+  float* blowerThresholdA0Ref_ = nullptr;
+  float* blowerThresholdA1Ref_ = nullptr;
+  uint16_t blowerDelaySec_ = 10;
+  uint16_t* blowerDelaySecRef_ = nullptr;
+  bool blowerState_ = false;
+  bool blowerBelowThreshold_ = false;
 
   static ConsoleService* active_;
 };
