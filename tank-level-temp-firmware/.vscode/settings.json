@@ -1,0 +1,7 @@
+{
+    "files.associations": {
+        "string_view": "cpp",
+        "regex": "cpp"
+    },
+    "cmake.sourceDirectory": "D:/Teo/IUDigital/telemetria-IUDA/Sensor A0221AU - i2c/lib/Arduino-Temperature-Control-Library-master"
+}
