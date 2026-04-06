@@ -34,6 +34,8 @@ class EspNowService {
   bool isSameMac(const uint8_t* a, const uint8_t* b) const;
   void handleRx(const uint8_t* mac, const uint8_t* data, int len);
 
+  static constexpr uint32_t kResponseTimeoutMs = 3000U;
+
   Logger& logger_;
   TelemetryService* telemetry_ = nullptr;
   bool ready_ = false;
@@ -41,6 +43,9 @@ class EspNowService {
   uint8_t tankMacs_[2][6] = {{0}};
   bool hasMac_[2] = {false, false};
   uint32_t seq_ = 0;
+  uint32_t lastRequestMs_[2] = {0, 0};
+  bool pendingResponse_[2] = {false, false};
+  bool timeoutApplied_[2] = {false, false};
 
   static EspNowService* active_;
 };

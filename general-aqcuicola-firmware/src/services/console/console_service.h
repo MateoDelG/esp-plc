@@ -15,6 +15,9 @@ class AnalogAcquisitionService;
 class Uart1Master;
 class PcfIoService;
 class EspNowService;
+class Logger;
+struct DashboardConfig;
+class TelemetryService;
 
 class ConsoleService {
  public:
@@ -33,8 +36,11 @@ class ConsoleService {
   void setUartMaster(Uart1Master* master);
   void setPcfIoService(PcfIoService* service);
   void setEspNowService(EspNowService* service);
+  void setTelemetryService(TelemetryService* service);
   void setUartAutoRefs(bool* enabled, uint32_t* intervalMs, uint32_t* lastMs);
   void setEspNowAutoRefs(bool* enabled, uint32_t* intervalMs, uint32_t* lastMs);
+  void setLogger(Logger* logger);
+  void setDashboardConfig(DashboardConfig* config);
 
   static void setActive(ConsoleService* service);
   static void logSink(const char* line);
@@ -69,6 +75,9 @@ class ConsoleService {
   Uart1Master* uartMaster_ = nullptr;
   PcfIoService* pcfIoService_ = nullptr;
   EspNowService* espNowService_ = nullptr;
+  TelemetryService* telemetryService_ = nullptr;
+  Logger* logger_ = nullptr;
+  DashboardConfig* dashboardConfig_ = nullptr;
   bool uartAutoEnabled_ = false;
   bool* uartAutoEnabledRef_ = nullptr;
   uint32_t uartAutoIntervalMs_ = 5U * 60U * 1000U;

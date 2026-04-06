@@ -5,6 +5,9 @@
 #include "services/console/pages/dashboard_script.h"
 #include "services/console/pages/console_fragment.h"
 #include "services/acquisition/analog_acquisition_service.h"
+#include "config/dashboard_config.h"
+#include "core/logger.h"
+#include "services/telemetry/telemetry_service.h"
 
 #include <cmath>
 #include <Wire.h>
@@ -12,6 +15,55 @@
 #include "services/espnow/espnow_service.h"
 #include "comms/uart1_master/uart1_master.h"
 #include "services/pcf_io/pcf_io_service.h"
+
+namespace {
+float clampFloat(float value, float minValue, float maxValue) {
+  if (value < minValue) {
+    return minValue;
+  }
+  if (value > maxValue) {
+    return maxValue;
+  }
+  return value;
+}
+
+uint16_t clampU16(int value, uint16_t minValue, uint16_t maxValue) {
+  if (value < static_cast<int>(minValue)) {
+    return minValue;
+  }
+  if (value > static_cast<int>(maxValue)) {
+    return maxValue;
+  }
+  return static_cast<uint16_t>(value);
+}
+
+uint16_t clampU16Min(int value, uint16_t minValue) {
+  if (value < static_cast<int>(minValue)) {
+    return minValue;
+  }
+  return static_cast<uint16_t>(value);
+}
+
+uint8_t clampU8(int value, uint8_t minValue, uint8_t maxValue) {
+  if (value < static_cast<int>(minValue)) {
+    return minValue;
+  }
+  if (value > static_cast<int>(maxValue)) {
+    return maxValue;
+  }
+  return static_cast<uint8_t>(value);
+}
+
+uint16_t clampU16Max(int value, uint16_t minValue, uint16_t maxValue) {
+  if (value < static_cast<int>(minValue)) {
+    return minValue;
+  }
+  if (value > static_cast<int>(maxValue)) {
+    return maxValue;
+  }
+  return static_cast<uint16_t>(value);
+}
+}  // namespace
 
 ConsoleService* ConsoleService::active_ = nullptr;
 
@@ -110,15 +162,19 @@ void ConsoleService::begin() {
         value.replace("\"", "");
         value.trim();
         int parsed = value.toInt();
-        if (parsed >= 0 && parsed <= 15) {
-          mask = static_cast<uint8_t>(parsed);
-        }
+        mask = clampU8(parsed, 0, 15);
       }
     }
 
     latestAnalog_.enabledMask = mask;
     if (analogService_) {
       analogService_->setEnabledMask(mask);
+    }
+    if (dashboardConfig_) {
+      if (dashboardConfig_->adsEnabledMask != mask) {
+        dashboardConfig_->adsEnabledMask = mask;
+        saveDashboardConfig(*dashboardConfig_, logger_);
+      }
     }
     String payload;
     payload.reserve(128);
@@ -188,8 +244,8 @@ void ConsoleService::begin() {
       return value.toFloat();
     };
 
-    blowerThresholdA0_ = parseField("a0", blowerThresholdA0_);
-    blowerThresholdA1_ = parseField("a1", blowerThresholdA1_);
+    blowerThresholdA0_ = clampFloat(parseField("a0", blowerThresholdA0_), 0.1f, 1.0f);
+    blowerThresholdA1_ = clampFloat(parseField("a1", blowerThresholdA1_), 0.1f, 1.0f);
     int idxDelay = body.indexOf("delaySec");
     if (idxDelay >= 0) {
       int colon = body.indexOf(':', idxDelay);
@@ -205,9 +261,7 @@ void ConsoleService::begin() {
         value.replace("\"", "");
         value.trim();
         int parsed = value.toInt();
-        if (parsed >= 1 && parsed <= 600) {
-          blowerDelaySec_ = static_cast<uint16_t>(parsed);
-        }
+        blowerDelaySec_ = clampU16(parsed, 1, 600);
       }
     }
 
@@ -241,6 +295,29 @@ void ConsoleService::begin() {
     }
     if (blowerAlarmEnabledRef_) {
       *blowerAlarmEnabledRef_ = blowerAlarmEnabled_;
+    }
+
+    if (dashboardConfig_) {
+      bool changed = false;
+      if (fabsf(dashboardConfig_->blowerThresholdA0 - blowerThresholdA0_) > 0.0001f) {
+        dashboardConfig_->blowerThresholdA0 = blowerThresholdA0_;
+        changed = true;
+      }
+      if (fabsf(dashboardConfig_->blowerThresholdA1 - blowerThresholdA1_) > 0.0001f) {
+        dashboardConfig_->blowerThresholdA1 = blowerThresholdA1_;
+        changed = true;
+      }
+      if (dashboardConfig_->blowerNotifyDelaySec != blowerDelaySec_) {
+        dashboardConfig_->blowerNotifyDelaySec = blowerDelaySec_;
+        changed = true;
+      }
+      if (dashboardConfig_->blowerAlarmEnabled != blowerAlarmEnabled_) {
+        dashboardConfig_->blowerAlarmEnabled = blowerAlarmEnabled_;
+        changed = true;
+      }
+      if (changed) {
+        saveDashboardConfig(*dashboardConfig_, logger_);
+      }
     }
 
     String payload;
@@ -325,12 +402,17 @@ void ConsoleService::begin() {
       return value.toInt();
     };
 
-    int enabled = parseField("enabled", -1);
-    int intervalMin = parseField("intervalMin", -1);
-    if (enabled < 0 || (enabled != 0 && enabled != 1) || intervalMin < 1) {
+    int enabled = parseField("enabled", uartAutoEnabled_ ? 1 : 0);
+    int currentIntervalMin = static_cast<int>(uartAutoIntervalMs_ / 60000U);
+    if (currentIntervalMin < 1) {
+      currentIntervalMin = 1;
+    }
+    int intervalMinRaw = parseField("intervalMin", currentIntervalMin);
+    if (enabled != 0 && enabled != 1) {
       server_.send(200, "application/json", "{\"ok\":false,\"error\":\"BAD_ARG\"}");
       return;
     }
+    uint16_t intervalMin = clampU16Min(intervalMinRaw, 1);
 
     uartAutoEnabled_ = enabled != 0;
     uartAutoIntervalMs_ = static_cast<uint32_t>(intervalMin) * 60000U;
@@ -342,6 +424,21 @@ void ConsoleService::begin() {
     }
     if (uartAutoLastMsRef_) {
       *uartAutoLastMsRef_ = uartAutoLastMs_;
+    }
+
+    if (dashboardConfig_) {
+      bool changed = false;
+      if (dashboardConfig_->uartAutoEnabled != uartAutoEnabled_) {
+        dashboardConfig_->uartAutoEnabled = uartAutoEnabled_;
+        changed = true;
+      }
+      if (dashboardConfig_->uartAutoIntervalMin != intervalMin) {
+        dashboardConfig_->uartAutoIntervalMin = intervalMin;
+        changed = true;
+      }
+      if (changed) {
+        saveDashboardConfig(*dashboardConfig_, logger_);
+      }
     }
 
     server_.send(200, "application/json", "{\"ok\":true}");
@@ -591,12 +688,17 @@ void ConsoleService::begin() {
       return value.toInt();
     };
 
-    int enabled = parseField("enabled", -1);
-    int intervalMin = parseField("intervalMin", -1);
-    if (enabled < 0 || (enabled != 0 && enabled != 1) || intervalMin < 1) {
+    int enabled = parseField("enabled", espNowAutoEnabled_ ? 1 : 0);
+    int currentIntervalMin = static_cast<int>(espNowAutoIntervalMs_ / 60000U);
+    if (currentIntervalMin < 1) {
+      currentIntervalMin = 1;
+    }
+    int intervalMinRaw = parseField("intervalMin", currentIntervalMin);
+    if (enabled != 0 && enabled != 1) {
       server_.send(200, "application/json", "{\"ok\":false,\"error\":\"BAD_ARG\"}");
       return;
     }
+    uint16_t intervalMin = clampU16Min(intervalMinRaw, 1);
 
     espNowAutoEnabled_ = enabled != 0;
     espNowAutoIntervalMs_ = static_cast<uint32_t>(intervalMin) * 60000U;
@@ -610,7 +712,88 @@ void ConsoleService::begin() {
       *espNowAutoLastMsRef_ = espNowAutoLastMs_;
     }
 
+    if (dashboardConfig_) {
+      bool changed = false;
+      if (dashboardConfig_->espNowAutoEnabled != espNowAutoEnabled_) {
+        dashboardConfig_->espNowAutoEnabled = espNowAutoEnabled_;
+        changed = true;
+      }
+      if (dashboardConfig_->espNowAutoIntervalMin != intervalMin) {
+        dashboardConfig_->espNowAutoIntervalMin = intervalMin;
+        changed = true;
+      }
+      if (changed) {
+        saveDashboardConfig(*dashboardConfig_, logger_);
+      }
+    }
+
     server_.send(200, "application/json", "{\"ok\":true}");
+  });
+
+  server_.on("/api/ubidots/interval", HTTP_GET, [this]() {
+    uint16_t minutes = 5;
+    if (dashboardConfig_) {
+      minutes = dashboardConfig_->ubidotsPublishIntervalMin;
+    }
+    String payload;
+    payload.reserve(96);
+    payload += "{\"ok\":true,\"intervalMin\":";
+    payload += String(minutes);
+    payload += "}";
+    server_.sendHeader("Cache-Control", "no-store, max-age=0");
+    server_.send(200, "application/json", payload);
+  });
+
+  server_.on("/api/ubidots/interval", HTTP_POST, [this]() {
+    String body = server_.arg("plain");
+
+    auto parseField = [&](const char* key, int current) -> int {
+      int idx = body.indexOf(key);
+      if (idx < 0) {
+        return current;
+      }
+      int colon = body.indexOf(':', idx);
+      if (colon < 0) {
+        return current;
+      }
+      int end = body.indexOf(',', colon);
+      if (end < 0) {
+        end = body.indexOf('}', colon);
+      }
+      if (end < 0) {
+        end = body.length();
+      }
+      String value = body.substring(colon + 1, end);
+      value.replace("\"", "");
+      value.trim();
+      return value.toInt();
+    };
+
+    uint16_t currentMin = 5;
+    if (dashboardConfig_) {
+      currentMin = dashboardConfig_->ubidotsPublishIntervalMin;
+    }
+    int intervalMinRaw = parseField("intervalMin", currentMin);
+    uint16_t intervalMin = clampU16Max(intervalMinRaw, 1, 1440);
+
+    if (dashboardConfig_) {
+      if (dashboardConfig_->ubidotsPublishIntervalMin != intervalMin) {
+        dashboardConfig_->ubidotsPublishIntervalMin = intervalMin;
+        saveDashboardConfig(*dashboardConfig_, logger_);
+      }
+    }
+    if (telemetryService_) {
+      telemetryService_->setPublishIntervalMs(
+        static_cast<uint32_t>(intervalMin) * 60000U);
+    }
+
+    String payload;
+    payload.reserve(96);
+    payload += "{\"ok\":true,\"intervalMin\":";
+    payload += String(intervalMin);
+    payload += "}";
+    server_.sendHeader("Cache-Control", "no-store, max-age=0");
+    server_.send(200, "application/json", payload);
   });
 
   server_.begin();
@@ -709,6 +892,10 @@ void ConsoleService::setEspNowService(EspNowService* service) {
   espNowService_ = service;
 }
 
+void ConsoleService::setTelemetryService(TelemetryService* service) {
+  telemetryService_ = service;
+}
+
 void ConsoleService::setUartAutoRefs(bool* enabled, uint32_t* intervalMs,
                                      uint32_t* lastMs) {
   uartAutoEnabledRef_ = enabled;
@@ -739,6 +926,14 @@ void ConsoleService::setEspNowAutoRefs(bool* enabled, uint32_t* intervalMs,
   if (espNowAutoLastMsRef_) {
     espNowAutoLastMs_ = *espNowAutoLastMsRef_;
   }
+}
+
+void ConsoleService::setLogger(Logger* logger) {
+  logger_ = logger;
+}
+
+void ConsoleService::setDashboardConfig(DashboardConfig* config) {
+  dashboardConfig_ = config;
 }
 
 void ConsoleService::setBlowerStatus(bool state, bool belowThreshold) {

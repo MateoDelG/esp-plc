@@ -36,9 +36,29 @@ void AppController::begin() {
     return;
   }
 
+  if (!loadDashboardConfig(dashboardConfig_, &logger_)) {
+    logger_.warn("cfg: dashboard defaults");
+  }
+  blowerThresholdA0_ = dashboardConfig_.blowerThresholdA0;
+  blowerThresholdA1_ = dashboardConfig_.blowerThresholdA1;
+  blowerNotifyDelaySec_ = dashboardConfig_.blowerNotifyDelaySec;
+  blowerAlarmEnabled_ = dashboardConfig_.blowerAlarmEnabled;
+  uartAutoEnabled_ = dashboardConfig_.uartAutoEnabled;
+  uartAutoIntervalMs_ =
+    static_cast<uint32_t>(dashboardConfig_.uartAutoIntervalMin) * 60000U;
+  espNowAutoEnabled_ = dashboardConfig_.espNowAutoEnabled;
+  espNowAutoIntervalMs_ =
+    static_cast<uint32_t>(dashboardConfig_.espNowAutoIntervalMin) * 60000U;
+  telemetryService_.setPublishIntervalMs(
+    static_cast<uint32_t>(dashboardConfig_.ubidotsPublishIntervalMin) * 60000U);
+  analogService_.setEnabledMask(dashboardConfig_.adsEnabledMask);
+
   consoleService_.begin();
   ConsoleService::setActive(&consoleService_);
   logger_.setSink(ConsoleService::logSink);
+  consoleService_.setLogger(&logger_);
+  consoleService_.setDashboardConfig(&dashboardConfig_);
+  consoleService_.setTelemetryService(&telemetryService_);
   consoleService_.setAnalogControl(&analogService_);
   consoleService_.setBlowerThresholdRefs(&blowerThresholdA0_, &blowerThresholdA1_);
   consoleService_.setBlowerDelayRef(&blowerNotifyDelaySec_);
@@ -95,6 +115,7 @@ void AppController::update() {
   consoleService_.update();
 
   pcfIoService_.update();
+  espNowService_.update();
 
   telemetryService_.update();
   consoleService_.setTelemetry(telemetryService_.data());
@@ -107,15 +128,13 @@ void AppController::update() {
   const AnalogChannelReading& ch0 = analog.channels[0];
   const AnalogChannelReading& ch1 = analog.channels[1];
 
-  bool belowThreshold = false;
-  if (a0Enabled && ch0.valid && ch0.volts < blowerThresholdA0_) {
-    belowThreshold = true;
-  }
-  if (a1Enabled && ch1.valid && ch1.volts < blowerThresholdA1_) {
-    belowThreshold = true;
-  }
-
-  bool verifierState = belowThreshold ? false : telemetryService_.data().stateBlowers;
+  bool a0Ok = a0Enabled && ch0.valid && ch0.volts >= blowerThresholdA0_;
+  bool a1Ok = a1Enabled && ch1.valid && ch1.volts >= blowerThresholdA1_;
+  uint8_t activeCount = static_cast<uint8_t>((a0Enabled ? 1 : 0) + (a1Enabled ? 1 : 0));
+  uint8_t okCount = static_cast<uint8_t>((a0Ok ? 1 : 0) + (a1Ok ? 1 : 0));
+  bool verifierState = (activeCount > 0) && (okCount == activeCount);
+  bool belowThreshold = (activeCount > 0) && (okCount != activeCount);
+  telemetryService_.setBlowersState(verifierState);
   consoleService_.setBlowerStatus(verifierState, belowThreshold);
 
   uint32_t delayMs = static_cast<uint32_t>(blowerNotifyDelaySec_) * 1000U;
@@ -147,9 +166,35 @@ void AppController::update() {
   if (pcfIoService_.isReady()) {
     bool alarmOn = blowerAlarmEnabled_ && !verifierState &&
       (millis() - blowerCandidateStartMs_ >= delayMs);
-    if (alarmOn != blowerAlarmOutput_) {
+    uint32_t nowMs = millis();
+
+    if (alarmOn != blowerAlarmCycleActive_) {
+      blowerAlarmCycleActive_ = alarmOn;
+      blowerAlarmPulseOn_ = alarmOn;
+      blowerAlarmPhaseStartMs_ = nowMs;
       if (pcfIoService_.setOutput(0, alarmOn ? 1 : 0)) {
         blowerAlarmOutput_ = alarmOn;
+      }
+    }
+
+    if (blowerAlarmCycleActive_) {
+      uint32_t elapsed = nowMs - blowerAlarmPhaseStartMs_;
+      if (blowerAlarmPulseOn_) {
+        if (elapsed >= 10000U) {
+          blowerAlarmPulseOn_ = false;
+          blowerAlarmPhaseStartMs_ = nowMs;
+        }
+      } else {
+        if (elapsed >= 25000U) {
+          blowerAlarmPulseOn_ = true;
+          blowerAlarmPhaseStartMs_ = nowMs;
+        }
+      }
+
+      if (blowerAlarmOutput_ != blowerAlarmPulseOn_) {
+        if (pcfIoService_.setOutput(0, blowerAlarmPulseOn_ ? 1 : 0)) {
+          blowerAlarmOutput_ = blowerAlarmPulseOn_;
+        }
       }
     }
   }

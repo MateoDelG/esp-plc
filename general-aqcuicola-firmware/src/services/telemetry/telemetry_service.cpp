@@ -7,6 +7,9 @@ TelemetryService::TelemetryService(Logger& logger, UbidotsService& ubidots)
 
 void TelemetryService::begin() {
   lastPublishMs_ = 0;
+  if (publishIntervalMs_ == 0) {
+    publishIntervalMs_ = kUbiPublishIntervalMs;
+  }
 }
 
 void TelemetryService::update() {
@@ -15,7 +18,7 @@ void TelemetryService::update() {
   }
 
   uint32_t now = millis();
-  if (now - lastPublishMs_ < kUbiPublishIntervalMs) {
+  if (now - lastPublishMs_ < publishIntervalMs_) {
     return;
   }
 
@@ -29,6 +32,18 @@ void TelemetryService::update() {
   } else {
     logger_.warn("telemetry: publish failed");
   }
+}
+
+void TelemetryService::setBlowersState(bool state) {
+  data_.stateBlowers = state ? 1 : 0;
+}
+
+void TelemetryService::setPublishIntervalMs(uint32_t intervalMs) {
+  if (intervalMs == 0) {
+    publishIntervalMs_ = kUbiPublishIntervalMs;
+    return;
+  }
+  publishIntervalMs_ = intervalMs;
 }
 
 void TelemetryService::updatePhO2FromUart(bool hasTank1, float ph1, float o2_1,

@@ -13,6 +13,7 @@
 #include "comms/uart1_master/uart1_master.h"
 #include "services/pcf_io/pcf_io_service.h"
 #include "services/espnow/espnow_service.h"
+#include "config/dashboard_config.h"
 
 class AppController {
  public:
@@ -38,10 +39,11 @@ class AppController {
   Uart1Master uart1Master_;
   PcfIoService pcfIoService_;
   EspNowService espNowService_;
+  DashboardConfig dashboardConfig_;
   DeviceStatus status_;
   AppState state_;
-  float blowerThresholdA0_ = 0.3f;
-  float blowerThresholdA1_ = 0.3f;
+  float blowerThresholdA0_ = 0.5f;
+  float blowerThresholdA1_ = 0.5f;
   uint16_t blowerNotifyDelaySec_ = 10;
   bool blowerCandidateState_ = false;
   uint32_t blowerCandidateStartMs_ = 0;
@@ -50,6 +52,9 @@ class AppController {
   bool blowerHasPublished_ = false;
   bool blowerAlarmEnabled_ = false;
   bool blowerAlarmOutput_ = false;
+  bool blowerAlarmCycleActive_ = false;
+  bool blowerAlarmPulseOn_ = false;
+  uint32_t blowerAlarmPhaseStartMs_ = 0;
   bool uartAutoEnabled_ = false;
   uint32_t uartAutoIntervalMs_ = 5U * 60U * 1000U;
   uint32_t uartAutoLastMs_ = 0;

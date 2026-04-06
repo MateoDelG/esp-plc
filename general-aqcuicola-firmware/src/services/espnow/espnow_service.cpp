@@ -36,15 +36,36 @@ void EspNowService::begin() {
 
 void EspNowService::update() {
   uint8_t chan = static_cast<uint8_t>(WiFi.channel());
-  if (chan == 0 || chan == channel_) {
+  if (chan != 0 && chan != channel_) {
+    uint8_t prev = channel_;
+    channel_ = chan;
+    esp_now_deinit();
+    ready_ = initEspNow();
+    logger_.logf("espnow", "channel change %u -> %u", static_cast<unsigned>(prev),
+                 static_cast<unsigned>(channel_));
+  }
+
+  if (!telemetry_) {
     return;
   }
-  uint8_t prev = channel_;
-  channel_ = chan;
-  esp_now_deinit();
-  ready_ = initEspNow();
-  logger_.logf("espnow", "channel change %u -> %u", static_cast<unsigned>(prev),
-               static_cast<unsigned>(channel_));
+
+  uint32_t now = millis();
+  for (uint8_t i = 0; i < 2; ++i) {
+    if (!pendingResponse_[i] || timeoutApplied_[i]) {
+      continue;
+    }
+    if (now - lastRequestMs_[i] < kResponseTimeoutMs) {
+      continue;
+    }
+    pendingResponse_[i] = false;
+    timeoutApplied_[i] = true;
+    if (i == 0) {
+      telemetry_->updateLevelTempFromEspNow(true, -99.0f, -99.0f, false, 0.0f, 0.0f);
+    } else {
+      telemetry_->updateLevelTempFromEspNow(false, 0.0f, 0.0f, true, -99.0f, -99.0f);
+    }
+    logger_.logf("espnow", "timeout tank %u -> -99", static_cast<unsigned>(i + 1));
+  }
 }
 
 bool EspNowService::isReady() const {
@@ -117,6 +138,9 @@ bool EspNowService::requestTank(uint8_t tank) {
     logger_.warn("espnow: send failed");
     return false;
   }
+  lastRequestMs_[idx] = millis();
+  pendingResponse_[idx] = true;
+  timeoutApplied_[idx] = false;
   logger_.logf("espnow", "request tank %u GET_STATUS", static_cast<unsigned>(tank));
   return true;
 }
@@ -252,13 +276,18 @@ void EspNowService::handleRx(const uint8_t* mac, const uint8_t* data, int len) {
   }
   JsonVariantConst levelVal = dataObj["level_cm"];
   JsonVariantConst tempVal = dataObj["temp_c"];
+  JsonVariantConst statusVal = dataObj["status"];
   if (levelVal.isNull() || tempVal.isNull()) {
     return;
   }
 
+  uint8_t status = statusVal.isNull() ? 0 : statusVal.as<uint8_t>();
   float level = levelVal.as<float>();
   float temp = tempVal.as<float>();
-  if (!std::isfinite(level) || !std::isfinite(temp)) {
+  if (status == 1) {
+    level = -99.0f;
+    temp = -99.0f;
+  } else if (!std::isfinite(level) || !std::isfinite(temp)) {
     return;
   }
 
@@ -273,10 +302,14 @@ void EspNowService::handleRx(const uint8_t* mac, const uint8_t* data, int len) {
     hasTank1 = true;
     level1 = level;
     temp1 = temp;
+    pendingResponse_[0] = false;
+    timeoutApplied_[0] = false;
   } else if (hasMac_[1] && isSameMac(mac, tankMacs_[1])) {
     hasTank2 = true;
     level2 = level;
     temp2 = temp;
+    pendingResponse_[1] = false;
+    timeoutApplied_[1] = false;
   }
 
   if (telemetry_ && (hasTank1 || hasTank2)) {

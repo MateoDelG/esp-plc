@@ -12,6 +12,8 @@ class TelemetryService {
 
   void begin();
   void update();
+  void setBlowersState(bool state);
+  void setPublishIntervalMs(uint32_t intervalMs);
   void updatePhO2FromUart(bool hasTank1, float ph1, float o2_1,
                           bool hasTank2, float ph2, float o2_2);
   void updateLevelTempFromEspNow(bool hasTank1, float level1, float temp1,
@@ -26,4 +28,5 @@ class TelemetryService {
   TelemetryPacket data_;
   bool lastPublishOk_ = false;
   uint32_t lastPublishMs_ = 0;
+  uint32_t publishIntervalMs_ = 0;
 };
