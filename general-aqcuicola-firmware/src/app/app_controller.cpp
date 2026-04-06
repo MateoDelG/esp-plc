@@ -16,6 +16,7 @@ AppController::AppController()
     otaModemService_(logger_),
     uart1Master_(logger_),
     pcfIoService_(logger_),
+    espNowService_(logger_),
     status_(),
     state_(AppState::Boot) {}
 
@@ -44,6 +45,12 @@ void AppController::begin() {
   consoleService_.setUartMaster(&uart1Master_);
   consoleService_.setPcfIoService(&pcfIoService_);
   consoleService_.setBlowerAlarmRef(&blowerAlarmEnabled_);
+  uart1Master_.setTelemetryService(&telemetryService_);
+  consoleService_.setEspNowService(&espNowService_);
+  consoleService_.setUartAutoRefs(&uartAutoEnabled_, &uartAutoIntervalMs_,
+                                  &uartAutoLastMs_);
+  consoleService_.setEspNowAutoRefs(&espNowAutoEnabled_, &espNowAutoIntervalMs_,
+                                    &espNowAutoLastMs_);
   logger_.info("console: ready");
 
   setState(AppState::WifiReady);
@@ -72,6 +79,8 @@ void AppController::begin() {
   analogService_.begin();
   pcfIoService_.begin();
   uart1Master_.begin();
+  espNowService_.setTelemetryService(&telemetryService_);
+  espNowService_.begin();
   setState(AppState::Running);
   logger_.info("version: 1.10");
 
@@ -110,6 +119,30 @@ void AppController::update() {
   consoleService_.setBlowerStatus(verifierState, belowThreshold);
 
   uint32_t delayMs = static_cast<uint32_t>(blowerNotifyDelaySec_) * 1000U;
+  if (uartAutoEnabled_ && uartAutoIntervalMs_ > 0) {
+    uint32_t now = millis();
+    if (now - uartAutoLastMs_ >= uartAutoIntervalMs_) {
+      if (uart1Master_.enqueue(Uart1Master::Op::AutoMeasure)) {
+        uartAutoLastMs_ = now;
+      }
+    }
+  }
+
+  if (espNowAutoEnabled_ && espNowAutoIntervalMs_ > 0) {
+    uint32_t now = millis();
+    if (now - espNowAutoLastMs_ >= espNowAutoIntervalMs_) {
+      bool sent = false;
+      if (espNowService_.requestTank(1)) {
+        sent = true;
+      }
+      if (espNowService_.requestTank(2)) {
+        sent = true;
+      }
+      if (sent) {
+        espNowAutoLastMs_ = now;
+      }
+    }
+  }
 
   if (pcfIoService_.isReady()) {
     bool alarmOn = blowerAlarmEnabled_ && !verifierState &&

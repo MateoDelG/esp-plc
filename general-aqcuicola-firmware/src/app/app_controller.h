@@ -12,6 +12,7 @@
 #include "services/console/console_service.h"
 #include "comms/uart1_master/uart1_master.h"
 #include "services/pcf_io/pcf_io_service.h"
+#include "services/espnow/espnow_service.h"
 
 class AppController {
  public:
@@ -36,6 +37,7 @@ class AppController {
   OtaModemService otaModemService_;
   Uart1Master uart1Master_;
   PcfIoService pcfIoService_;
+  EspNowService espNowService_;
   DeviceStatus status_;
   AppState state_;
   float blowerThresholdA0_ = 0.3f;
@@ -48,4 +50,10 @@ class AppController {
   bool blowerHasPublished_ = false;
   bool blowerAlarmEnabled_ = false;
   bool blowerAlarmOutput_ = false;
+  bool uartAutoEnabled_ = false;
+  uint32_t uartAutoIntervalMs_ = 5U * 60U * 1000U;
+  uint32_t uartAutoLastMs_ = 0;
+  bool espNowAutoEnabled_ = false;
+  uint32_t espNowAutoIntervalMs_ = 5U * 60U * 1000U;
+  uint32_t espNowAutoLastMs_ = 0;
 };

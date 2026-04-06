@@ -5,7 +5,11 @@
 #include "services/console/pages/dashboard_script.h"
 #include "services/console/pages/console_fragment.h"
 #include "services/acquisition/analog_acquisition_service.h"
+
+#include <cmath>
 #include <Wire.h>
+#include <WiFi.h>
+#include "services/espnow/espnow_service.h"
 #include "comms/uart1_master/uart1_master.h"
 #include "services/pcf_io/pcf_io_service.h"
 
@@ -38,14 +42,28 @@ void ConsoleService::begin() {
     String payload;
     payload.reserve(256);
     payload += "{";
-    payload += "\"phTank1\":" + String(latestTelemetry_.phTank1, 2) + ",";
-    payload += "\"phTank2\":" + String(latestTelemetry_.phTank2, 2) + ",";
-    payload += "\"o2Tank1\":" + String(latestTelemetry_.o2Tank1, 2) + ",";
-    payload += "\"o2Tank2\":" + String(latestTelemetry_.o2Tank2, 2) + ",";
-    payload += "\"tempTank1\":" + String(latestTelemetry_.tempTank1, 2) + ",";
-    payload += "\"tempTank2\":" + String(latestTelemetry_.tempTank2, 2) + ",";
-    payload += "\"levelTank1\":" + String(latestTelemetry_.levelTank1, 2) + ",";
-    payload += "\"levelTank2\":" + String(latestTelemetry_.levelTank2, 2) + ",";
+    auto appendFloat = [&](const char* key, float value, bool trailingComma) {
+      payload += "\"";
+      payload += key;
+      payload += "\":";
+      if (std::isfinite(value)) {
+        payload += String(value, 2);
+      } else {
+        payload += "null";
+      }
+      if (trailingComma) {
+        payload += ",";
+      }
+    };
+
+    appendFloat("phTank1", latestTelemetry_.phTank1, true);
+    appendFloat("phTank2", latestTelemetry_.phTank2, true);
+    appendFloat("o2Tank1", latestTelemetry_.o2Tank1, true);
+    appendFloat("o2Tank2", latestTelemetry_.o2Tank2, true);
+    appendFloat("tempTank1", latestTelemetry_.tempTank1, true);
+    appendFloat("tempTank2", latestTelemetry_.tempTank2, true);
+    appendFloat("levelTank1", latestTelemetry_.levelTank1, true);
+    appendFloat("levelTank2", latestTelemetry_.levelTank2, true);
     payload += "\"stateBlowers\":" + String(latestTelemetry_.stateBlowers ? "true" : "false") + ",";
     payload += "\"timestampMs\":" + String(millis());
     payload += "}";
@@ -266,6 +284,69 @@ void ConsoleService::begin() {
     server_.send(200, "application/json", "{\"ok\":true}");
   });
 
+  server_.on("/api/uart/auto", HTTP_GET, [this]() {
+    String payload;
+    payload.reserve(96);
+    payload += "{\"ok\":true,\"enabled\":";
+    payload += String(uartAutoEnabled_ ? "true" : "false");
+    payload += ",\"intervalMin\":";
+    uint32_t minutes = uartAutoIntervalMs_ / 60000U;
+    if (minutes == 0) {
+      minutes = 1;
+    }
+    payload += String(minutes);
+    payload += "}";
+    server_.sendHeader("Cache-Control", "no-store, max-age=0");
+    server_.send(200, "application/json", payload);
+  });
+
+  server_.on("/api/uart/auto", HTTP_POST, [this]() {
+    String body = server_.arg("plain");
+
+    auto parseField = [&](const char* key, int current) -> int {
+      int idx = body.indexOf(key);
+      if (idx < 0) {
+        return current;
+      }
+      int colon = body.indexOf(':', idx);
+      if (colon < 0) {
+        return current;
+      }
+      int end = body.indexOf(',', colon);
+      if (end < 0) {
+        end = body.indexOf('}', colon);
+      }
+      if (end < 0) {
+        end = body.length();
+      }
+      String value = body.substring(colon + 1, end);
+      value.replace("\"", "");
+      value.trim();
+      return value.toInt();
+    };
+
+    int enabled = parseField("enabled", -1);
+    int intervalMin = parseField("intervalMin", -1);
+    if (enabled < 0 || (enabled != 0 && enabled != 1) || intervalMin < 1) {
+      server_.send(200, "application/json", "{\"ok\":false,\"error\":\"BAD_ARG\"}");
+      return;
+    }
+
+    uartAutoEnabled_ = enabled != 0;
+    uartAutoIntervalMs_ = static_cast<uint32_t>(intervalMin) * 60000U;
+    if (uartAutoEnabledRef_) {
+      *uartAutoEnabledRef_ = uartAutoEnabled_;
+    }
+    if (uartAutoIntervalMsRef_) {
+      *uartAutoIntervalMsRef_ = uartAutoIntervalMs_;
+    }
+    if (uartAutoLastMsRef_) {
+      *uartAutoLastMsRef_ = uartAutoLastMs_;
+    }
+
+    server_.send(200, "application/json", "{\"ok\":true}");
+  });
+
   server_.on("/api/pcf/state", HTTP_GET, [this]() {
     if (!pcfIoService_) {
       server_.send(200, "application/json", "{\"ok\":false,\"error\":\"NO_PCF\"}");
@@ -369,6 +450,169 @@ void ConsoleService::begin() {
     server_.send(200, "application/json", payload);
   });
 
+  server_.on("/api/espnow/config", HTTP_GET, [this]() {
+    if (!espNowService_) {
+      server_.send(200, "application/json", "{\"ok\":false,\"error\":\"NO_ESPNOW\"}");
+      return;
+    }
+    String payload;
+    payload.reserve(192);
+    payload += "{\"ok\":true,\"tank1\":\"";
+    payload += espNowService_->getTankMac(1);
+    payload += "\",\"tank2\":\"";
+    payload += espNowService_->getTankMac(2);
+    payload += "\",\"self\":\"";
+    payload += WiFi.macAddress();
+    payload += "\",\"channel\":";
+    payload += String(espNowService_->channel());
+    payload += "}";
+    server_.sendHeader("Cache-Control", "no-store, max-age=0");
+    server_.send(200, "application/json", payload);
+  });
+
+  server_.on("/api/espnow/config", HTTP_POST, [this]() {
+    if (!espNowService_) {
+      server_.send(200, "application/json", "{\"ok\":false,\"error\":\"NO_ESPNOW\"}");
+      return;
+    }
+    String body = server_.arg("plain");
+
+    auto parseField = [&](const char* key, String current) -> String {
+      int idx = body.indexOf(key);
+      if (idx < 0) {
+        return current;
+      }
+      int colon = body.indexOf(':', idx);
+      if (colon < 0) {
+        return current;
+      }
+      int end = body.indexOf(',', colon);
+      if (end < 0) {
+        end = body.indexOf('}', colon);
+      }
+      if (end < 0) {
+        end = body.length();
+      }
+      String value = body.substring(colon + 1, end);
+      value.replace("\"", "");
+      value.trim();
+      return value;
+    };
+
+    int tank = parseField("tank", "").toInt();
+    String mac = parseField("mac", "");
+    if (tank < 1 || tank > 2 || mac.length() == 0) {
+      server_.send(200, "application/json", "{\"ok\":false,\"error\":\"BAD_ARG\"}");
+      return;
+    }
+    if (!espNowService_->setTankMac(static_cast<uint8_t>(tank), mac)) {
+      server_.send(200, "application/json", "{\"ok\":false,\"error\":\"BAD_MAC\"}");
+      return;
+    }
+    server_.send(200, "application/json", "{\"ok\":true}");
+  });
+
+  server_.on("/api/espnow/request", HTTP_POST, [this]() {
+    if (!espNowService_) {
+      server_.send(200, "application/json", "{\"ok\":false,\"error\":\"NO_ESPNOW\"}");
+      return;
+    }
+    String body = server_.arg("plain");
+    int idx = body.indexOf("tank");
+    if (idx < 0) {
+      server_.send(200, "application/json", "{\"ok\":false,\"error\":\"BAD_ARG\"}");
+      return;
+    }
+    int colon = body.indexOf(':', idx);
+    if (colon < 0) {
+      server_.send(200, "application/json", "{\"ok\":false,\"error\":\"BAD_ARG\"}");
+      return;
+    }
+    int end = body.indexOf(',', colon);
+    if (end < 0) {
+      end = body.indexOf('}', colon);
+    }
+    if (end < 0) {
+      end = body.length();
+    }
+    String value = body.substring(colon + 1, end);
+    value.replace("\"", "");
+    value.trim();
+    int tank = value.toInt();
+    if (tank < 1 || tank > 2) {
+      server_.send(200, "application/json", "{\"ok\":false,\"error\":\"BAD_ARG\"}");
+      return;
+    }
+    if (!espNowService_->requestTank(static_cast<uint8_t>(tank))) {
+      server_.send(200, "application/json", "{\"ok\":false,\"error\":\"SEND_FAIL\"}");
+      return;
+    }
+    server_.send(200, "application/json", "{\"ok\":true}");
+  });
+
+  server_.on("/api/espnow/auto", HTTP_GET, [this]() {
+    String payload;
+    payload.reserve(96);
+    payload += "{\"ok\":true,\"enabled\":";
+    payload += String(espNowAutoEnabled_ ? "true" : "false");
+    payload += ",\"intervalMin\":";
+    uint32_t minutes = espNowAutoIntervalMs_ / 60000U;
+    if (minutes == 0) {
+      minutes = 1;
+    }
+    payload += String(minutes);
+    payload += "}";
+    server_.sendHeader("Cache-Control", "no-store, max-age=0");
+    server_.send(200, "application/json", payload);
+  });
+
+  server_.on("/api/espnow/auto", HTTP_POST, [this]() {
+    String body = server_.arg("plain");
+
+    auto parseField = [&](const char* key, int current) -> int {
+      int idx = body.indexOf(key);
+      if (idx < 0) {
+        return current;
+      }
+      int colon = body.indexOf(':', idx);
+      if (colon < 0) {
+        return current;
+      }
+      int end = body.indexOf(',', colon);
+      if (end < 0) {
+        end = body.indexOf('}', colon);
+      }
+      if (end < 0) {
+        end = body.length();
+      }
+      String value = body.substring(colon + 1, end);
+      value.replace("\"", "");
+      value.trim();
+      return value.toInt();
+    };
+
+    int enabled = parseField("enabled", -1);
+    int intervalMin = parseField("intervalMin", -1);
+    if (enabled < 0 || (enabled != 0 && enabled != 1) || intervalMin < 1) {
+      server_.send(200, "application/json", "{\"ok\":false,\"error\":\"BAD_ARG\"}");
+      return;
+    }
+
+    espNowAutoEnabled_ = enabled != 0;
+    espNowAutoIntervalMs_ = static_cast<uint32_t>(intervalMin) * 60000U;
+    if (espNowAutoEnabledRef_) {
+      *espNowAutoEnabledRef_ = espNowAutoEnabled_;
+    }
+    if (espNowAutoIntervalMsRef_) {
+      *espNowAutoIntervalMsRef_ = espNowAutoIntervalMs_;
+    }
+    if (espNowAutoLastMsRef_) {
+      *espNowAutoLastMsRef_ = espNowAutoLastMs_;
+    }
+
+    server_.send(200, "application/json", "{\"ok\":true}");
+  });
+
   server_.begin();
 
   ws_.begin();
@@ -459,6 +703,42 @@ void ConsoleService::setUartMaster(Uart1Master* master) {
 
 void ConsoleService::setPcfIoService(PcfIoService* service) {
   pcfIoService_ = service;
+}
+
+void ConsoleService::setEspNowService(EspNowService* service) {
+  espNowService_ = service;
+}
+
+void ConsoleService::setUartAutoRefs(bool* enabled, uint32_t* intervalMs,
+                                     uint32_t* lastMs) {
+  uartAutoEnabledRef_ = enabled;
+  uartAutoIntervalMsRef_ = intervalMs;
+  uartAutoLastMsRef_ = lastMs;
+  if (uartAutoEnabledRef_) {
+    uartAutoEnabled_ = *uartAutoEnabledRef_;
+  }
+  if (uartAutoIntervalMsRef_) {
+    uartAutoIntervalMs_ = *uartAutoIntervalMsRef_;
+  }
+  if (uartAutoLastMsRef_) {
+    uartAutoLastMs_ = *uartAutoLastMsRef_;
+  }
+}
+
+void ConsoleService::setEspNowAutoRefs(bool* enabled, uint32_t* intervalMs,
+                                       uint32_t* lastMs) {
+  espNowAutoEnabledRef_ = enabled;
+  espNowAutoIntervalMsRef_ = intervalMs;
+  espNowAutoLastMsRef_ = lastMs;
+  if (espNowAutoEnabledRef_) {
+    espNowAutoEnabled_ = *espNowAutoEnabledRef_;
+  }
+  if (espNowAutoIntervalMsRef_) {
+    espNowAutoIntervalMs_ = *espNowAutoIntervalMsRef_;
+  }
+  if (espNowAutoLastMsRef_) {
+    espNowAutoLastMs_ = *espNowAutoLastMsRef_;
+  }
 }
 
 void ConsoleService::setBlowerStatus(bool state, bool belowThreshold) {

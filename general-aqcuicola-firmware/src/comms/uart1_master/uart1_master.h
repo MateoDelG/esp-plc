@@ -10,6 +10,8 @@
 #include "freertos/queue.h"
 #include "freertos/task.h"
 
+class TelemetryService;
+
 class Uart1Master {
  public:
   enum class Op : uint8_t {
@@ -22,6 +24,7 @@ class Uart1Master {
 
   void begin();
   bool enqueue(Op op);
+  void setTelemetryService(TelemetryService* telemetry);
 
  private:
   static void taskEntry(void* param);
@@ -31,8 +34,10 @@ class Uart1Master {
   bool readNdjsonLine(String& line, uint32_t timeoutMs);
   void logResponsePretty(const String& line);
   void logPrettyJson(const JsonDocument& doc, const char* prefix);
+  void updateTelemetryFromDoc(const JsonDocument& doc);
 
   Logger& logger_;
+  TelemetryService* telemetry_ = nullptr;
   QueueHandle_t queue_ = nullptr;
   TaskHandle_t task_ = nullptr;
 };

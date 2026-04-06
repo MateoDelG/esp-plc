@@ -14,6 +14,7 @@
 class AnalogAcquisitionService;
 class Uart1Master;
 class PcfIoService;
+class EspNowService;
 
 class ConsoleService {
  public:
@@ -31,6 +32,9 @@ class ConsoleService {
   void setBlowerAlarmRef(bool* enabled);
   void setUartMaster(Uart1Master* master);
   void setPcfIoService(PcfIoService* service);
+  void setEspNowService(EspNowService* service);
+  void setUartAutoRefs(bool* enabled, uint32_t* intervalMs, uint32_t* lastMs);
+  void setEspNowAutoRefs(bool* enabled, uint32_t* intervalMs, uint32_t* lastMs);
 
   static void setActive(ConsoleService* service);
   static void logSink(const char* line);
@@ -64,6 +68,19 @@ class ConsoleService {
   bool blowerBelowThreshold_ = false;
   Uart1Master* uartMaster_ = nullptr;
   PcfIoService* pcfIoService_ = nullptr;
+  EspNowService* espNowService_ = nullptr;
+  bool uartAutoEnabled_ = false;
+  bool* uartAutoEnabledRef_ = nullptr;
+  uint32_t uartAutoIntervalMs_ = 5U * 60U * 1000U;
+  uint32_t* uartAutoIntervalMsRef_ = nullptr;
+  uint32_t uartAutoLastMs_ = 0;
+  uint32_t* uartAutoLastMsRef_ = nullptr;
+  bool espNowAutoEnabled_ = false;
+  bool* espNowAutoEnabledRef_ = nullptr;
+  uint32_t espNowAutoIntervalMs_ = 5U * 60U * 1000U;
+  uint32_t* espNowAutoIntervalMsRef_ = nullptr;
+  uint32_t espNowAutoLastMs_ = 0;
+  uint32_t* espNowAutoLastMsRef_ = nullptr;
 
   static ConsoleService* active_;
 };

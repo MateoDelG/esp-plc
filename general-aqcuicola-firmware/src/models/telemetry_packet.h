@@ -1,13 +1,15 @@
 #pragma once
 
+#include <Arduino.h>
+
 struct TelemetryPacket {
-  float levelTank1 = 10.0f;
-  float levelTank2 = 60.0f;
-  float o2Tank1 = 10.1f;
-  float o2Tank2 = 1.3f;
-  float phTank1 = 10.0f;
-  float phTank2 = 1.2f;
-  float tempTank1 = 60.5f;
-  float tempTank2 = 5.1f;
+  float levelTank1 = NAN;
+  float levelTank2 = NAN;
+  float o2Tank1 = NAN;
+  float o2Tank2 = NAN;
+  float phTank1 = NAN;
+  float phTank2 = NAN;
+  float tempTank1 = NAN;
+  float tempTank2 = NAN;
   int stateBlowers = 1;
 };

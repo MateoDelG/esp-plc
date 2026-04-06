@@ -2,6 +2,8 @@
 
 #include <ArduinoJson.h>
 
+#include "services/telemetry/telemetry_service.h"
+
 namespace {
 constexpr uint32_t kUartBaud = 115200;
 constexpr uint8_t kUartRxPin = 19;
@@ -29,6 +31,10 @@ bool Uart1Master::enqueue(Op op) {
     return false;
   }
   return xQueueSend(queue_, &op, 0) == pdTRUE;
+}
+
+void Uart1Master::setTelemetryService(TelemetryService* telemetry) {
+  telemetry_ = telemetry;
 }
 
 void Uart1Master::taskEntry(void* param) {
@@ -121,7 +127,7 @@ bool Uart1Master::readNdjsonLine(String& line, uint32_t timeoutMs) {
 }
 
 void Uart1Master::logResponsePretty(const String& line) {
-  StaticJsonDocument<2048> doc;
+  JsonDocument doc;
   DeserializationError err = deserializeJson(doc, line);
   if (err) {
     logger_.logf("uart1", "rx raw: %s", line.c_str());
@@ -129,6 +135,7 @@ void Uart1Master::logResponsePretty(const String& line) {
     return;
   }
 
+  updateTelemetryFromDoc(doc);
   logPrettyJson(doc, "[UART] RX pretty: ");
 }
 
@@ -159,5 +166,50 @@ void Uart1Master::logPrettyJson(const JsonDocument& doc, const char* prefix) {
       break;
     }
     start = static_cast<size_t>(end + 1);
+  }
+}
+
+void Uart1Master::updateTelemetryFromDoc(const JsonDocument& doc) {
+  if (!telemetry_) {
+    return;
+  }
+
+  JsonObjectConst data = doc["data"].as<JsonObjectConst>();
+  if (data.isNull()) {
+    return;
+  }
+
+  JsonArrayConst samples = data["samples"].as<JsonArrayConst>();
+  if (samples.isNull()) {
+    return;
+  }
+
+  bool hasTank1 = false;
+  bool hasTank2 = false;
+  float ph1 = 0.0f;
+  float o21 = 0.0f;
+  float ph2 = 0.0f;
+  float o22 = 0.0f;
+
+  for (JsonVariantConst sample : samples) {
+    int id = sample["id"] | 0;
+    JsonVariantConst phVal = sample["ph_val"];
+    JsonVariantConst o2Val = sample["o2_val"];
+    if (phVal.isNull() || o2Val.isNull()) {
+      continue;
+    }
+    if (id == 1) {
+      ph1 = phVal.as<float>();
+      o21 = o2Val.as<float>();
+      hasTank1 = true;
+    } else if (id == 2) {
+      ph2 = phVal.as<float>();
+      o22 = o2Val.as<float>();
+      hasTank2 = true;
+    }
+  }
+
+  if (hasTank1 || hasTank2) {
+    telemetry_->updatePhO2FromUart(hasTank1, ph1, o21, hasTank2, ph2, o22);
   }
 }

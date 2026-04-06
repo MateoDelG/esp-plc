@@ -12,6 +12,10 @@ class TelemetryService {
 
   void begin();
   void update();
+  void updatePhO2FromUart(bool hasTank1, float ph1, float o2_1,
+                          bool hasTank2, float ph2, float o2_2);
+  void updateLevelTempFromEspNow(bool hasTank1, float level1, float temp1,
+                                 bool hasTank2, float level2, float temp2);
 
   const TelemetryPacket& data() const;
   bool lastPublishOk() const;
