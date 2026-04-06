@@ -10,6 +10,7 @@
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
 #include <freertos/semphr.h>
+#include <freertos/queue.h>
 #include "UltrasonicA02YYUW.h"
 #include "DS18B20_manager.h"
 #include "Globals.h"
@@ -71,7 +72,9 @@ static uint32_t g_espNowSeq = 0;
 static uint8_t g_espNowChannel = 6;
 static uint8_t g_espNowNextChannel = 6;
 static bool g_espNowChannelPending = false;
+static bool g_espNowPeerAdded = false;
 static Preferences g_espNowPrefs;
+static QueueHandle_t g_espNowQueue = nullptr;
 
 static WebServer g_webServer(80);
 static WebSocketsServer g_wsServer(81);
@@ -79,6 +82,18 @@ static bool g_webPortalStarted = false;
 static String g_apName;
 static String g_staMac;
 static uint32_t g_lastWsSendMs = 0;
+
+enum EspNowRequestType : uint8_t {
+  REQ_UNKNOWN = 0,
+  REQ_PING = 1,
+  REQ_STATUS = 2
+};
+
+struct EspNowRequest {
+  uint8_t mac[6];
+  uint8_t len;
+  char data[16];
+};
 
 // Prototipos
 void setupOutputs();
@@ -105,6 +120,8 @@ String formatMac(const uint8_t *mac);
 bool isMacValid(const uint8_t *mac);
 bool parseMacString(const String &input, uint8_t mac[6]);
 String getPeerMacString();
+static EspNowRequestType parseRequestType(const char *data, int len);
+static bool isConfiguredPeer(const uint8_t *mac);
 void startWebPortal();
 void onEspNowRecv(const uint8_t *mac, const uint8_t *data, int len);
 void onEspNowSent(const uint8_t *mac, esp_now_send_status_t status);
@@ -130,6 +147,15 @@ static void unlockGlobals() {
   }
 }
 
+static bool lockGlobalsTimed(TickType_t ticks, const char *tag) {
+  if (!g_globalsMutex) return true;
+  if (xSemaphoreTake(g_globalsMutex, ticks) == pdTRUE) return true;
+  TaskHandle_t holder = xSemaphoreGetMutexHolder(g_globalsMutex);
+  const char *holderName = holder ? pcTaskGetName(holder) : "none";
+  Serial.printf("[MUTEX] timeout tag=%s holder=%s\n", tag ? tag : "-", holderName);
+  return false;
+}
+
 
 
 void setup() {
@@ -137,6 +163,10 @@ void setup() {
   delay(5000);
 
   g_globalsMutex = xSemaphoreCreateMutex();
+  g_espNowQueue = xQueueCreate(6, sizeof(EspNowRequest));
+  if (!g_espNowQueue) {
+    Serial.println("[ESPNOW] Error creando cola de solicitudes");
+  }
 
   Storage::begin();
 
@@ -191,7 +221,7 @@ void setup() {
   xTaskCreate(taskI2C, "TaskI2C", 3072, nullptr, 2, nullptr);
   xTaskCreate(taskStorage, "TaskStorage", 4096, nullptr, 1, nullptr);
   xTaskCreate(taskLogger, "TaskLogger", 4096, nullptr, 1, nullptr);
-  xTaskCreate(taskEspNow, "TaskEspNow", 4096, nullptr, 1, nullptr);
+  xTaskCreate(taskEspNow, "TaskEspNow", 6144, nullptr, 1, nullptr);
   xTaskCreate(taskWebPortal, "TaskWebPortal", 6144, nullptr, 1, nullptr);
 
   Serial.println("\n[MAIN] Sistema iniciado (FreeRTOS).");
@@ -577,6 +607,7 @@ void taskEspNow(void *pvParameters) {
       g_espNowChannel = g_espNowNextChannel;
       esp_now_deinit();
       g_espNowInitialized = false;
+      g_espNowPeerAdded = false;
       Serial.printf("[ESPNOW] Canal actualizado a %u\n", g_espNowChannel);
     }
 
@@ -585,7 +616,28 @@ void taskEspNow(void *pvParameters) {
       continue;
     }
 
-    vTaskDelayUntil(&lastWake, pdMS_TO_TICKS(1000));
+    if (g_espNowQueue) {
+      EspNowRequest req;
+      while (xQueueReceive(g_espNowQueue, &req, 0) == pdTRUE) {
+        EspNowRequestType type = parseRequestType(req.data, req.len);
+        char macStr[18];
+        snprintf(macStr, sizeof(macStr), "%02X:%02X:%02X:%02X:%02X:%02X",
+                 req.mac[0], req.mac[1], req.mac[2], req.mac[3], req.mac[4], req.mac[5]);
+        if (!isConfiguredPeer(req.mac)) {
+          Serial.printf("[ESPNOW] RX %s: ignored (not configured)\n", macStr);
+        } else if (type == REQ_PING) {
+          Serial.printf("[ESPNOW] RX %s: PING\n", macStr);
+          sendEspNowText(req.mac, "PONG");
+        } else if (type == REQ_STATUS) {
+          Serial.printf("[ESPNOW] RX %s: GET_STATUS\n", macStr);
+          sendEspNowStatus(req.mac);
+        } else {
+          Serial.printf("[ESPNOW] RX %s: ignored\n", macStr);
+        }
+      }
+    }
+
+    vTaskDelayUntil(&lastWake, pdMS_TO_TICKS(200));
   }
 }
 
@@ -650,36 +702,55 @@ String getPeerMacString() {
   return formatMac(mac);
 }
 
+static bool isConfiguredPeer(const uint8_t *mac) {
+  if (!isMacValid(mac)) return false;
+  uint8_t cfg[6] = {0};
+  lockGlobals();
+  Globals::getEspNowPeerMac(cfg);
+  unlockGlobals();
+  if (!isMacValid(cfg)) return false;
+  return memcmp(mac, cfg, sizeof(cfg)) == 0;
+}
+
+static EspNowRequestType parseRequestType(const char *data, int len) {
+  if (!data || len <= 0) return REQ_UNKNOWN;
+  int i = 0;
+  while (i < len && isspace(static_cast<unsigned char>(data[i]))) i++;
+  if (i >= len) return REQ_UNKNOWN;
+
+  auto match = [&](const char *cmd) -> bool {
+    int pos = i;
+    for (int j = 0; cmd[j] != 0; j++) {
+      if (pos >= len) return false;
+      char c = data[pos++];
+      if (c >= 'a' && c <= 'z') c = static_cast<char>(c - 32);
+      if (c != cmd[j]) return false;
+    }
+    while (pos < len) {
+      if (!isspace(static_cast<unsigned char>(data[pos]))) return false;
+      pos++;
+    }
+    return true;
+  };
+
+  if (match("PING")) return REQ_PING;
+  if (match("GET_STATUS")) return REQ_STATUS;
+  return REQ_UNKNOWN;
+}
+
 void onEspNowRecv(const uint8_t *mac, const uint8_t *data, int len) {
   if (len <= 0 || mac == nullptr || data == nullptr) return;
-
-  if (!ensurePeerForMac(mac)) {
-    return;
-  }
-
-  char buf[250];
+  if (!g_espNowQueue) return;
+  EspNowRequest req = {};
+  memcpy(req.mac, mac, sizeof(req.mac));
   int copyLen = len;
-  if (copyLen > static_cast<int>(sizeof(buf) - 1)) {
-    copyLen = sizeof(buf) - 1;
+  if (copyLen > static_cast<int>(sizeof(req.data) - 1)) {
+    copyLen = sizeof(req.data) - 1;
   }
-  memcpy(buf, data, copyLen);
-  buf[copyLen] = 0;
-
-  String msg(buf);
-  msg.trim();
-  msg.toUpperCase();
-
-  Serial.printf("[ESPNOW] RX %s: %s\n", formatMac(mac).c_str(), msg.c_str());
-
-  if (msg == "PING") {
-    sendEspNowText(mac, "PONG");
-    return;
-  }
-
-  if (msg == "GET_STATUS") {
-    sendEspNowStatus(mac);
-    Serial.printf("[ESPNOW] Enviando status a %s\n", formatMac(mac).c_str());
-  }
+  memcpy(req.data, data, copyLen);
+  req.data[copyLen] = 0;
+  req.len = static_cast<uint8_t>(copyLen);
+  xQueueSend(g_espNowQueue, &req, 0);
 }
 
 void onEspNowSent(const uint8_t *mac, esp_now_send_status_t status) {
@@ -718,6 +789,19 @@ bool ensureEspNowInitialized() {
   g_espNowInitialized = true;
   Serial.printf("[ESPNOW] Inicializado. MAC STA: %s, canal %u\n",
                 WiFi.macAddress().c_str(), g_espNowChannel);
+
+  uint8_t cfgMac[6] = {0};
+  lockGlobals();
+  Globals::getEspNowPeerMac(cfgMac);
+  unlockGlobals();
+  if (isMacValid(cfgMac)) {
+    g_espNowPeerAdded = configureEspNowPeer(cfgMac);
+    Serial.printf("[ESPNOW] Peer preagregado: %s (ok=%d)\n",
+                  formatMac(cfgMac).c_str(), g_espNowPeerAdded ? 1 : 0);
+  } else {
+    g_espNowPeerAdded = false;
+    Serial.println("[ESPNOW] Peer preagregado: --");
+  }
   return true;
 }
 
@@ -800,41 +884,88 @@ void sendWsStatus() {
 
 void sendEspNowText(const uint8_t *dest, const char *text) {
   if (dest == nullptr || text == nullptr) return;
-  if (!ensurePeerForMac(dest)) return;
+  if (!isConfiguredPeer(dest)) return;
+  if (!g_espNowPeerAdded || !esp_now_is_peer_exist(dest)) return;
   esp_now_send(dest, reinterpret_cast<const uint8_t *>(text), strlen(text));
 }
 
 void sendEspNowStatus(const uint8_t *dest) {
   if (dest == nullptr) return;
-  if (!ensurePeerForMac(dest)) return;
+  if (!isConfiguredPeer(dest)) return;
+  if (!g_espNowPeerAdded || !esp_now_is_peer_exist(dest)) return;
+
+  Serial.printf("[HEAP] before status: free=%u min=%u\n",
+                ESP.getFreeHeap(), ESP.getMinFreeHeap());
 
   float level = NAN;
   float temp = NAN;
   uint8_t status = 0;
   bool i2cEnabled = false;
 
-  lockGlobals();
-    level = getLevelCm();
+  if (!lockGlobalsTimed(pdMS_TO_TICKS(200), "espnow_status")) {
+    return;
+  }
+  float filt = Globals::getDistanceFiltered();
+  float offset = Globals::getZeroOffset();
   temp = Globals::getTemperature();
   status = Globals::getSensorStatus();
   i2cEnabled = Globals::isI2CEnabled();
   unlockGlobals();
 
-  String deviceId = g_apName.length() > 0 ? g_apName : String("SensorNivel");
-  String macStr = WiFi.macAddress();
-  String json = "{";
-  json += "\"type\":\"status\",";
-  json += "\"ver\":1,";
-  json += "\"device\":{\"mac\":\"" + macStr + "\",\"id\":\"" + deviceId + "\"},";
-  json += "\"ts_ms\":" + String(millis()) + ",";
-  json += "\"seq\":" + String(g_espNowSeq++) + ",";
-  json += "\"data\":{\"level_cm\":" + String(level, 2)
-       + ",\"temp_c\":" + String(temp, 2)
-       + ",\"status\":" + String(status)
-       + ",\"i2c\":" + String(i2cEnabled ? 1 : 0) + "}";
-  json += "}";
+  if (!isnan(filt)) {
+    level = offset - filt;
+    if (level < 0.0f) level = 0.0f;
+    if (level > offset) level = offset;
+  }
 
-  esp_now_send(dest, reinterpret_cast<const uint8_t *>(json.c_str()), json.length());
+  Serial.printf("[HEAP] after globals: free=%u min=%u\n",
+                ESP.getFreeHeap(), ESP.getMinFreeHeap());
+
+  const char *deviceId = g_apName.length() > 0 ? g_apName.c_str() : "SensorNivel";
+  uint8_t deviceMac[6] = {0};
+  WiFi.macAddress(deviceMac);
+  char deviceMacStr[18];
+  snprintf(deviceMacStr, sizeof(deviceMacStr), "%02X:%02X:%02X:%02X:%02X:%02X",
+           deviceMac[0], deviceMac[1], deviceMac[2], deviceMac[3], deviceMac[4], deviceMac[5]);
+
+  uint32_t seq = g_espNowSeq++;
+  uint32_t ts = millis();
+
+  char levelStr[16];
+  char tempStr[16];
+  dtostrf(level, 0, 2, levelStr);
+  dtostrf(temp, 0, 2, tempStr);
+
+  char json[256];
+  int len = snprintf(json, sizeof(json),
+                     "{\"type\":\"status\",\"ver\":1,"
+                     "\"device\":{\"mac\":\"%s\",\"id\":\"%s\"},"
+                     "\"ts_ms\":%lu,\"seq\":%lu,"
+                     "\"data\":{\"level_cm\":%s,\"temp_c\":%s,\"status\":%u,\"i2c\":%u}}",
+                     deviceMacStr, deviceId,
+                     static_cast<unsigned long>(ts),
+                     static_cast<unsigned long>(seq),
+                     levelStr, tempStr, status, i2cEnabled ? 1 : 0);
+  if (len < 0) return;
+  if (len >= static_cast<int>(sizeof(json))) {
+    len = sizeof(json) - 1;
+    json[len] = 0;
+  }
+
+  Serial.printf("[HEAP] before send: free=%u min=%u len=%d\n",
+                ESP.getFreeHeap(), ESP.getMinFreeHeap(), len);
+
+  esp_err_t res = esp_now_send(dest, reinterpret_cast<const uint8_t *>(json), len);
+  Serial.printf("[HEAP] after send: free=%u min=%u res=%d\n",
+                ESP.getFreeHeap(), ESP.getMinFreeHeap(), res);
+  uint8_t primary = 0;
+  wifi_second_chan_t second = WIFI_SECOND_CHAN_NONE;
+  esp_wifi_get_channel(&primary, &second);
+  char destMacStr[18];
+  snprintf(destMacStr, sizeof(destMacStr), "%02X:%02X:%02X:%02X:%02X:%02X",
+           dest[0], dest[1], dest[2], dest[3], dest[4], dest[5]);
+  Serial.printf("[ESPNOW] TX status -> %s ch=%u len=%d res=%d\n",
+                destMacStr, primary, len, res);
 }
 
 void startWebPortal() {
