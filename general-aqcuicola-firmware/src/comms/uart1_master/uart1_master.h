@@ -11,6 +11,7 @@
 #include "freertos/task.h"
 
 class TelemetryService;
+class SdLoggerService;
 
 class Uart1Master {
  public:
@@ -25,6 +26,7 @@ class Uart1Master {
   void begin();
   bool enqueue(Op op);
   void setTelemetryService(TelemetryService* telemetry);
+  void setSdLogger(SdLoggerService* logger);
 
  private:
   static void taskEntry(void* param);
@@ -38,6 +40,7 @@ class Uart1Master {
 
   Logger& logger_;
   TelemetryService* telemetry_ = nullptr;
+  SdLoggerService* sdLogger_ = nullptr;
   QueueHandle_t queue_ = nullptr;
   TaskHandle_t task_ = nullptr;
 };

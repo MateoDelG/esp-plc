@@ -84,6 +84,7 @@ bool ModemHttp::get(const char* url, uint16_t readLen) {
   return (status == 200 || status == 204 || status == 301 || status == 302);
 }
 
+
 bool ModemHttp::downloadToFile(const char* url, const char* sdPath,
                                uint16_t chunkSize, ModemLogSink logSink,
                                bool (*sdRecoverFn)(), uint16_t flushThreshold,

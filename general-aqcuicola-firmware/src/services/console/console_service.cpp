@@ -8,6 +8,8 @@
 #include "config/dashboard_config.h"
 #include "core/logger.h"
 #include "services/telemetry/telemetry_service.h"
+#include "services/time/time_service.h"
+#include <SD.h>
 
 #include <cmath>
 #include <Wire.h>
@@ -62,6 +64,65 @@ uint16_t clampU16Max(int value, uint16_t minValue, uint16_t maxValue) {
     return maxValue;
   }
   return static_cast<uint16_t>(value);
+}
+
+bool readLastLines(const char* path, uint8_t maxLines, String& out) {
+  File file = SD.open(path, FILE_READ);
+  if (!file) {
+    return false;
+  }
+  size_t size = file.size();
+  if (size == 0) {
+    file.close();
+    return true;
+  }
+  String buffer;
+  buffer.reserve(512);
+  int linesFound = 0;
+  size_t pos = size;
+  while (pos > 0 && linesFound <= maxLines) {
+    size_t chunk = pos > 128 ? 128 : pos;
+    pos -= chunk;
+    file.seek(pos);
+    char temp[128];
+    size_t readLen = file.readBytes(temp, chunk);
+    for (int i = static_cast<int>(readLen) - 1; i >= 0; --i) {
+      if (temp[i] == '\n') {
+        linesFound++;
+        if (linesFound > maxLines) {
+          pos += static_cast<size_t>(i + 1);
+          goto done;
+        }
+      }
+    }
+  }
+done:
+  file.seek(pos);
+  buffer = file.readString();
+  file.close();
+  out = buffer;
+  return true;
+}
+
+bool clearLogsDir() {
+  if (!SD.exists("/logs")) {
+    return SD.mkdir("/logs");
+  }
+  File dir = SD.open("/logs");
+  if (!dir) {
+    return false;
+  }
+  File entry = dir.openNextFile();
+  while (entry) {
+    const char* name = entry.name();
+    entry.close();
+    if (name && strlen(name) > 0) {
+      SD.remove(name);
+    }
+    entry = dir.openNextFile();
+  }
+  dir.close();
+  return true;
 }
 }  // namespace
 
@@ -796,6 +857,76 @@ void ConsoleService::begin() {
     server_.send(200, "application/json", payload);
   });
 
+  server_.on("/api/time", HTTP_GET, [this]() {
+    String payload;
+    payload.reserve(160);
+    payload += "{\"ok\":true,";
+    if (timeService_) {
+      payload += "\"synced\":" + String(timeService_->isSynced() ? "true" : "false") + ",";
+      payload += "\"local\":\"" + timeService_->localTimeString() + "\",";
+      payload += "\"lastSyncMs\":" + String(timeService_->lastSyncMs());
+    } else {
+      payload += "\"synced\":false,\"local\":\"--\",\"lastSyncMs\":0";
+    }
+    payload += "}";
+    server_.sendHeader("Cache-Control", "no-store, max-age=0");
+    server_.send(200, "application/json", payload);
+  });
+
+  server_.on("/api/sd/logs", HTTP_GET, [this]() {
+    String type = server_.arg("type");
+    String path;
+    if (type == "uart") {
+      path = "/logs/uart_ph_o2_temp.jsonl";
+    } else if (type == "level") {
+      path = "/logs/level_temp.jsonl";
+    } else {
+      server_.send(200, "application/json", "{\"ok\":false,\"error\":\"BAD_TYPE\"}");
+      return;
+    }
+
+    String content;
+    bool ok = readLastLines(path.c_str(), 10, content);
+    String payload;
+    payload.reserve(256);
+    payload += "{\"ok\":";
+    payload += ok ? "true" : "false";
+    payload += ",\"lines\":[";
+    if (ok && content.length() > 0) {
+      int start = 0;
+      int count = 0;
+      while (start < content.length() && count < 10) {
+        int end = content.indexOf('\n', start);
+        if (end < 0) {
+          end = content.length();
+        }
+        String line = content.substring(start, end);
+        line.trim();
+        if (line.length() > 0) {
+          if (count > 0) {
+            payload += ",";
+          }
+          payload += "\"";
+          line.replace("\\", "\\\\");
+          line.replace("\"", "\\\"");
+          payload += line;
+          payload += "\"";
+          count++;
+        }
+        start = end + 1;
+      }
+    }
+    payload += "]}";
+    server_.sendHeader("Cache-Control", "no-store, max-age=0");
+    server_.send(200, "application/json", payload);
+  });
+
+  server_.on("/api/sd/clear", HTTP_POST, [this]() {
+    bool ok = clearLogsDir();
+    server_.sendHeader("Cache-Control", "no-store, max-age=0");
+    server_.send(200, "application/json", ok ? "{\"ok\":true}" : "{\"ok\":false}");
+  });
+
   server_.begin();
 
   ws_.begin();
@@ -896,6 +1027,11 @@ void ConsoleService::setTelemetryService(TelemetryService* service) {
   telemetryService_ = service;
 }
 
+void ConsoleService::setTimeService(TimeService* service) {
+  timeService_ = service;
+}
+
+
 void ConsoleService::setUartAutoRefs(bool* enabled, uint32_t* intervalMs,
                                      uint32_t* lastMs) {
   uartAutoEnabledRef_ = enabled;
@@ -943,6 +1079,13 @@ void ConsoleService::setBlowerStatus(bool state, bool belowThreshold) {
 
 void ConsoleService::setActive(ConsoleService* service) {
   active_ = service;
+}
+
+TimeService* ConsoleService::activeTimeService() {
+  if (!active_) {
+    return nullptr;
+  }
+  return active_->timeService_;
 }
 
 void ConsoleService::logSink(const char* line) {

@@ -17,6 +17,8 @@ AppController::AppController()
     uart1Master_(logger_),
     pcfIoService_(logger_),
     espNowService_(logger_),
+    timeService_(logger_, ubidotsService_),
+    sdLoggerService_(logger_),
     status_(),
     state_(AppState::Boot) {}
 
@@ -59,6 +61,7 @@ void AppController::begin() {
   consoleService_.setLogger(&logger_);
   consoleService_.setDashboardConfig(&dashboardConfig_);
   consoleService_.setTelemetryService(&telemetryService_);
+  consoleService_.setTimeService(&timeService_);
   consoleService_.setAnalogControl(&analogService_);
   consoleService_.setBlowerThresholdRefs(&blowerThresholdA0_, &blowerThresholdA1_);
   consoleService_.setBlowerDelayRef(&blowerNotifyDelaySec_);
@@ -92,6 +95,9 @@ void AppController::begin() {
     logger_.info("ubidots: task started");
   }
 
+  timeService_.begin();
+
+
   otaModemService_.setModem(&ubidotsService_.modem());
   otaModemService_.setUbidots(&ubidotsService_);
 
@@ -118,6 +124,7 @@ void AppController::update() {
   espNowService_.update();
 
   telemetryService_.update();
+  timeService_.update();
   consoleService_.setTelemetry(telemetryService_.data());
   analogService_.update();
   consoleService_.setAnalogSnapshot(analogService_.data());

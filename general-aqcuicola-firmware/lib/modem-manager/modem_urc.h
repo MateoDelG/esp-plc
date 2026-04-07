@@ -19,6 +19,7 @@ enum class UrcType : uint8_t {
   MqttRxTopic,
   MqttRxPayload,
   MqttRxEnd,
+  Cntp,
 };
 
 struct UrcEvent {

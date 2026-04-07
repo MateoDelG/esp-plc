@@ -7,6 +7,7 @@
 #include <esp_now.h>
 
 class TelemetryService;
+class SdLoggerService;
 
 class EspNowService {
  public:
@@ -18,6 +19,7 @@ class EspNowService {
   uint8_t channel() const;
 
   void setTelemetryService(TelemetryService* telemetry);
+  void setSdLogger(SdLoggerService* logger);
   bool setTankMac(uint8_t tank, const String& mac);
   String getTankMac(uint8_t tank) const;
   bool requestTank(uint8_t tank);
@@ -38,6 +40,7 @@ class EspNowService {
 
   Logger& logger_;
   TelemetryService* telemetry_ = nullptr;
+  SdLoggerService* sdLogger_ = nullptr;
   bool ready_ = false;
   uint8_t channel_ = 0;
   uint8_t tankMacs_[2][6] = {{0}};

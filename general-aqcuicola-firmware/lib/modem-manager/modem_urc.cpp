@@ -42,6 +42,9 @@ UrcType UrcStore::classify(const String& line) {
   if (line.startsWith("+CMQTTRXEND:")) {
     return UrcType::MqttRxEnd;
   }
+  if (line.startsWith("+CNTP:")) {
+    return UrcType::Cntp;
+  }
   return UrcType::None;
 }
 

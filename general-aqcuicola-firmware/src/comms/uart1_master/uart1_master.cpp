@@ -3,6 +3,7 @@
 #include <ArduinoJson.h>
 
 #include "services/telemetry/telemetry_service.h"
+#include "services/sd_logger/sd_logger_service.h"
 
 namespace {
 constexpr uint32_t kUartBaud = 115200;
@@ -35,6 +36,10 @@ bool Uart1Master::enqueue(Op op) {
 
 void Uart1Master::setTelemetryService(TelemetryService* telemetry) {
   telemetry_ = telemetry;
+}
+
+void Uart1Master::setSdLogger(SdLoggerService* logger) {
+  sdLogger_ = logger;
 }
 
 void Uart1Master::taskEntry(void* param) {
@@ -188,28 +193,41 @@ void Uart1Master::updateTelemetryFromDoc(const JsonDocument& doc) {
   bool hasTank2 = false;
   float ph1 = 0.0f;
   float o21 = 0.0f;
+  float temp1 = 0.0f;
   float ph2 = 0.0f;
   float o22 = 0.0f;
+  float temp2 = 0.0f;
 
   for (JsonVariantConst sample : samples) {
     int id = sample["id"] | 0;
     JsonVariantConst phVal = sample["ph_val"];
     JsonVariantConst o2Val = sample["o2_val"];
-    if (phVal.isNull() || o2Val.isNull()) {
+    JsonVariantConst tempVal = sample["tempC"];
+    if (phVal.isNull() || o2Val.isNull() || tempVal.isNull()) {
       continue;
     }
     if (id == 1) {
       ph1 = phVal.as<float>();
       o21 = o2Val.as<float>();
+      temp1 = tempVal.as<float>();
       hasTank1 = true;
     } else if (id == 2) {
       ph2 = phVal.as<float>();
       o22 = o2Val.as<float>();
+      temp2 = tempVal.as<float>();
       hasTank2 = true;
     }
   }
 
   if (hasTank1 || hasTank2) {
     telemetry_->updatePhO2FromUart(hasTank1, ph1, o21, hasTank2, ph2, o22);
+    if (sdLogger_) {
+      if (hasTank1) {
+        sdLogger_->logUartSample(1, ph1, o21, temp1);
+      }
+      if (hasTank2) {
+        sdLogger_->logUartSample(2, ph2, o22, temp2);
+      }
+    }
   }
 }

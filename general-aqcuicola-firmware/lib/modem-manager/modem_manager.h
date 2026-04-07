@@ -11,6 +11,7 @@
 #include "modem_data_session.h"
 #include "modem_http.h"
 #include "modem_mqtt.h"
+#include "modem_ntp.h"
 #include "modem_log.h"
 #include "modem_types.h"
 #include "modem_urc.h"
@@ -37,6 +38,9 @@ class ModemManager {
   bool disconnectGprs();
 
   bool ping(const char* host, uint8_t count = 4, uint32_t timeoutMs = 1000);
+  bool syncTimeWithNtp(const char* server, int tzQuarterHours, uint32_t timeoutMs,
+                       time_t& outEpoch, String* outClock);
+
 
   bool httpGetTest(const char* url, uint16_t readLen = 64);
   bool httpGet(const char* url, uint16_t readLen = 64);
@@ -124,6 +128,7 @@ class ModemManager {
   ModemDataSession data_;
   ModemHttp http_;
   ModemMqtt mqtt_;
+  ModemNtp ntp_;
 
   ModemState state_ = ModemState::Off;
   ModemError lastError_;

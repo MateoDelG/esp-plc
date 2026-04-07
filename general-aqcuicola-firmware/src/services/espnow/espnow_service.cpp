@@ -10,6 +10,7 @@
 #include <cmath>
 
 #include "services/telemetry/telemetry_service.h"
+#include "services/sd_logger/sd_logger_service.h"
 
 namespace {
 constexpr char kPrefsNamespace[] = "espnow";
@@ -45,7 +46,7 @@ void EspNowService::update() {
                  static_cast<unsigned>(channel_));
   }
 
-  if (!telemetry_) {
+  if (!telemetry_ && !sdLogger_) {
     return;
   }
 
@@ -60,9 +61,19 @@ void EspNowService::update() {
     pendingResponse_[i] = false;
     timeoutApplied_[i] = true;
     if (i == 0) {
-      telemetry_->updateLevelTempFromEspNow(true, -99.0f, -99.0f, false, 0.0f, 0.0f);
+      if (telemetry_) {
+        telemetry_->updateLevelTempFromEspNow(true, -99.0f, -99.0f, false, 0.0f, 0.0f);
+      }
+      if (sdLogger_) {
+        sdLogger_->logLevelTemp(1, -99.0f, -99.0f);
+      }
     } else {
-      telemetry_->updateLevelTempFromEspNow(false, 0.0f, 0.0f, true, -99.0f, -99.0f);
+      if (telemetry_) {
+        telemetry_->updateLevelTempFromEspNow(false, 0.0f, 0.0f, true, -99.0f, -99.0f);
+      }
+      if (sdLogger_) {
+        sdLogger_->logLevelTemp(2, -99.0f, -99.0f);
+      }
     }
     logger_.logf("espnow", "timeout tank %u -> -99", static_cast<unsigned>(i + 1));
   }
@@ -78,6 +89,10 @@ uint8_t EspNowService::channel() const {
 
 void EspNowService::setTelemetryService(TelemetryService* telemetry) {
   telemetry_ = telemetry;
+}
+
+void EspNowService::setSdLogger(SdLoggerService* logger) {
+  sdLogger_ = logger;
 }
 
 bool EspNowService::setTankMac(uint8_t tank, const String& mac) {
@@ -315,6 +330,15 @@ void EspNowService::handleRx(const uint8_t* mac, const uint8_t* data, int len) {
   if (telemetry_ && (hasTank1 || hasTank2)) {
     telemetry_->updateLevelTempFromEspNow(hasTank1, level1, temp1,
                                           hasTank2, level2, temp2);
+  }
+
+  if (sdLogger_ && (hasTank1 || hasTank2)) {
+    if (hasTank1) {
+      sdLogger_->logLevelTemp(1, level1, temp1);
+    }
+    if (hasTank2) {
+      sdLogger_->logLevelTemp(2, level2, temp2);
+    }
   }
 
   logger_.logf("espnow", "rx level=%.2f temp=%.2f", level, temp);

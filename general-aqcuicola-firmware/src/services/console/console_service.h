@@ -18,6 +18,7 @@ class EspNowService;
 class Logger;
 struct DashboardConfig;
 class TelemetryService;
+class TimeService;
 
 class ConsoleService {
  public:
@@ -37,6 +38,7 @@ class ConsoleService {
   void setPcfIoService(PcfIoService* service);
   void setEspNowService(EspNowService* service);
   void setTelemetryService(TelemetryService* service);
+  void setTimeService(TimeService* service);
   void setUartAutoRefs(bool* enabled, uint32_t* intervalMs, uint32_t* lastMs);
   void setEspNowAutoRefs(bool* enabled, uint32_t* intervalMs, uint32_t* lastMs);
   void setLogger(Logger* logger);
@@ -44,6 +46,7 @@ class ConsoleService {
 
   static void setActive(ConsoleService* service);
   static void logSink(const char* line);
+  static TimeService* activeTimeService();
 
  private:
   void handleSocketEvent(uint8_t clientId, WStype_t type, uint8_t* payload,
@@ -76,6 +79,7 @@ class ConsoleService {
   PcfIoService* pcfIoService_ = nullptr;
   EspNowService* espNowService_ = nullptr;
   TelemetryService* telemetryService_ = nullptr;
+  TimeService* timeService_ = nullptr;
   Logger* logger_ = nullptr;
   DashboardConfig* dashboardConfig_ = nullptr;
   bool uartAutoEnabled_ = false;

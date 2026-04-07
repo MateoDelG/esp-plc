@@ -1,0 +1,114 @@
+#include "services/sd_logger/sd_logger_service.h"
+
+#include <SD.h>
+
+#include "core/logger.h"
+#include "services/time/time_service.h"
+
+namespace {
+constexpr uint8_t kSdCsPin = 13;
+constexpr char kLogsDir[] = "/logs";
+constexpr char kUartLogPath[] = "/logs/uart_ph_o2_temp.jsonl";
+constexpr char kLevelLogPath[] = "/logs/level_temp.jsonl";
+}
+
+SdLoggerService::SdLoggerService(Logger& logger) : logger_(logger) {}
+
+void SdLoggerService::begin() {
+  ready_ = SD.begin(kSdCsPin);
+  if (!ready_) {
+    logger_.warn("sd: init failed");
+    readyLogged_ = true;
+    return;
+  }
+  ensureLogsDir();
+  logger_.info("sd: ready");
+}
+
+void SdLoggerService::setTimeService(TimeService* service) {
+  timeService_ = service;
+}
+
+bool SdLoggerService::isReady() const {
+  return ready_;
+}
+
+bool SdLoggerService::ensureReady() {
+  if (ready_) {
+    return true;
+  }
+  if (!readyLogged_) {
+    logger_.warn("sd: not ready");
+    readyLogged_ = true;
+  }
+  return false;
+}
+
+bool SdLoggerService::ensureLogsDir() {
+  if (SD.exists(kLogsDir)) {
+    return true;
+  }
+  return SD.mkdir(kLogsDir);
+}
+
+bool SdLoggerService::appendLine(const char* path, const String& line) {
+  File file = SD.open(path, FILE_APPEND);
+  if (!file) {
+    logger_.warn("sd: open failed");
+    return false;
+  }
+  file.println(line);
+  file.close();
+  return true;
+}
+
+String SdLoggerService::formatTimestamp() const {
+  if (timeService_ && timeService_->isSynced()) {
+    return timeService_->localTimeString();
+  }
+  return String("--");
+}
+
+void SdLoggerService::logUartSample(uint8_t tank, float ph, float o2, float tempC) {
+  if (!ensureReady()) {
+    return;
+  }
+  String line;
+  line.reserve(160);
+  line += "{\"ts\":\"";
+  line += formatTimestamp();
+  line += "\",\"tank\":";
+  line += String(tank);
+  line += ",\"ph\":";
+  line += String(ph, 3);
+  line += ",\"o2\":";
+  line += String(o2, 3);
+  line += ",\"temp\":";
+  line += String(tempC, 2);
+  line += "}";
+  if (appendLine(kUartLogPath, line)) {
+    logger_.logf("sd", "datalogger uart tank=%u ph=%.3f o2=%.3f temp=%.2f",
+                 static_cast<unsigned>(tank), ph, o2, tempC);
+  }
+}
+
+void SdLoggerService::logLevelTemp(uint8_t tank, float level, float tempC) {
+  if (!ensureReady()) {
+    return;
+  }
+  String line;
+  line.reserve(140);
+  line += "{\"ts\":\"";
+  line += formatTimestamp();
+  line += "\",\"tank\":";
+  line += String(tank);
+  line += ",\"level\":";
+  line += String(level, 2);
+  line += ",\"temp\":";
+  line += String(tempC, 2);
+  line += "}";
+  if (appendLine(kLevelLogPath, line)) {
+    logger_.logf("sd", "datalogger level tank=%u level=%.2f temp=%.2f",
+                 static_cast<unsigned>(tank), level, tempC);
+  }
+}

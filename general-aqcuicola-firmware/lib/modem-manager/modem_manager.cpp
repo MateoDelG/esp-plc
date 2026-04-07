@@ -20,7 +20,8 @@ ModemManager::ModemManager(const ModemConfig& config)
       core_(*this),
       data_(*this),
       http_(*this),
-      mqtt_(*this) {}
+      mqtt_(*this),
+      ntp_(*this) {}
 
 void ModemManager::setLogsEnabled(bool enabled) { config_.enableLogs = enabled; }
 
@@ -79,6 +80,17 @@ bool ModemManager::ping(const char* host, uint8_t count, uint32_t timeoutMs) {
 
   return true;
 }
+
+bool ModemManager::syncTimeWithNtp(const char* server, int tzQuarterHours,
+                                   uint32_t timeoutMs, time_t& outEpoch,
+                                   String* outClock) {
+  if (!data_.ensureNetOpen()) {
+    logWarn("ntp", "netopen not ready");
+    return false;
+  }
+  return ntp_.sync(server, tzQuarterHours, timeoutMs, outEpoch, outClock);
+}
+
 
 bool ModemManager::httpGetTest(const char* url, uint16_t readLen) {
   return http_.get(url, readLen);
