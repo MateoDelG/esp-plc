@@ -69,6 +69,7 @@ void AppController::begin() {
   consoleService_.setPcfIoService(&pcfIoService_);
   consoleService_.setBlowerAlarmRef(&blowerAlarmEnabled_);
   uart1Master_.setTelemetryService(&telemetryService_);
+  uart1Master_.setSdLogger(&sdLoggerService_);
   consoleService_.setEspNowService(&espNowService_);
   consoleService_.setUartAutoRefs(&uartAutoEnabled_, &uartAutoIntervalMs_,
                                   &uartAutoLastMs_);
@@ -96,6 +97,8 @@ void AppController::begin() {
   }
 
   timeService_.begin();
+  sdLoggerService_.begin();
+  sdLoggerService_.setTimeService(&timeService_);
 
 
   otaModemService_.setModem(&ubidotsService_.modem());
@@ -106,6 +109,7 @@ void AppController::begin() {
   pcfIoService_.begin();
   uart1Master_.begin();
   espNowService_.setTelemetryService(&telemetryService_);
+  espNowService_.setSdLogger(&sdLoggerService_);
   espNowService_.begin();
   setState(AppState::Running);
   logger_.info("version: 1.10");
@@ -148,7 +152,8 @@ void AppController::update() {
   if (uartAutoEnabled_ && uartAutoIntervalMs_ > 0) {
     uint32_t now = millis();
     if (now - uartAutoLastMs_ >= uartAutoIntervalMs_) {
-      if (uart1Master_.enqueue(Uart1Master::Op::AutoMeasure)) {
+      if (uart1Master_.enqueue(Uart1Master::Op::GetLast) &&
+          uart1Master_.enqueue(Uart1Master::Op::AutoMeasure)) {
         uartAutoLastMs_ = now;
       }
     }

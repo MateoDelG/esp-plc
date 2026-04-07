@@ -1,21 +1,43 @@
 #include "services/sd_logger/sd_logger_service.h"
 
 #include <SD.h>
+#include <SPI.h>
 
 #include "core/logger.h"
 #include "services/time/time_service.h"
 
 namespace {
-constexpr uint8_t kSdCsPin = 13;
+#ifndef SD_MISO
+#define SD_MISO 2
+#endif
+#ifndef SD_MOSI
+#define SD_MOSI 15
+#endif
+#ifndef SD_SCLK
+#define SD_SCLK 14
+#endif
+#ifndef SD_CS
+#define SD_CS 13
+#endif
+
+constexpr uint8_t kSdCsPin = SD_CS;
 constexpr char kLogsDir[] = "/logs";
 constexpr char kUartLogPath[] = "/logs/uart_ph_o2_temp.jsonl";
 constexpr char kLevelLogPath[] = "/logs/level_temp.jsonl";
+
+SPIClass& sdSpi() {
+  static SPIClass spiSd(HSPI);
+  return spiSd;
+}
 }
 
 SdLoggerService::SdLoggerService(Logger& logger) : logger_(logger) {}
 
 void SdLoggerService::begin() {
-  ready_ = SD.begin(kSdCsPin);
+  if (!sdMutex_) {
+    sdMutex_ = xSemaphoreCreateMutex();
+  }
+  ready_ = initSd();
   if (!ready_) {
     logger_.warn("sd: init failed");
     readyLogged_ = true;
@@ -51,14 +73,46 @@ bool SdLoggerService::ensureLogsDir() {
   return SD.mkdir(kLogsDir);
 }
 
-bool SdLoggerService::appendLine(const char* path, const String& line) {
+bool SdLoggerService::initSd() {
+  SPIClass& spi = sdSpi();
+  spi.begin(SD_SCLK, SD_MISO, SD_MOSI, SD_CS);
+  return SD.begin(kSdCsPin, spi);
+}
+
+bool SdLoggerService::appendLine(const char* path, const String& line,
+                                 bool waitForMutex) {
+  if (!sdMutex_) {
+    return false;
+  }
+  if (waitForMutex) {
+    xSemaphoreTake(sdMutex_, portMAX_DELAY);
+  } else {
+    if (xSemaphoreTake(sdMutex_, 0) != pdTRUE) {
+      return false;
+    }
+  }
+
+  if (!ensureLogsDir()) {
+    xSemaphoreGive(sdMutex_);
+    return false;
+  }
   File file = SD.open(path, FILE_APPEND);
   if (!file) {
-    logger_.warn("sd: open failed");
-    return false;
+    SD.end();
+    ready_ = initSd();
+    if (ready_) {
+      ensureLogsDir();
+      file = SD.open(path, FILE_APPEND);
+    }
+    if (!file) {
+      logger_.warn("sd: open failed");
+      xSemaphoreGive(sdMutex_);
+      return false;
+    }
   }
   file.println(line);
   file.close();
+  xSemaphoreGive(sdMutex_);
   return true;
 }
 
@@ -86,7 +140,7 @@ void SdLoggerService::logUartSample(uint8_t tank, float ph, float o2, float temp
   line += ",\"temp\":";
   line += String(tempC, 2);
   line += "}";
-  if (appendLine(kUartLogPath, line)) {
+  if (appendLine(kUartLogPath, line, true)) {
     logger_.logf("sd", "datalogger uart tank=%u ph=%.3f o2=%.3f temp=%.2f",
                  static_cast<unsigned>(tank), ph, o2, tempC);
   }
@@ -107,7 +161,7 @@ void SdLoggerService::logLevelTemp(uint8_t tank, float level, float tempC) {
   line += ",\"temp\":";
   line += String(tempC, 2);
   line += "}";
-  if (appendLine(kLevelLogPath, line)) {
+  if (appendLine(kLevelLogPath, line, false)) {
     logger_.logf("sd", "datalogger level tank=%u level=%.2f temp=%.2f",
                  static_cast<unsigned>(tank), level, tempC);
   }

@@ -114,10 +114,11 @@ bool clearLogsDir() {
   }
   File entry = dir.openNextFile();
   while (entry) {
-    const char* name = entry.name();
+    String name = entry.name();
     entry.close();
-    if (name && strlen(name) > 0) {
-      SD.remove(name);
+    if (name.length() > 0) {
+      String fullPath = String("/logs/") + name;
+      SD.remove(fullPath.c_str());
     }
     entry = dir.openNextFile();
   }
@@ -402,24 +403,36 @@ void ConsoleService::begin() {
       server_.send(200, "application/json", "{\"ok\":false,\"error\":\"NO_UART\"}");
       return;
     }
-    Uart1Master::Op cmd;
     if (op == "get_status") {
-      cmd = Uart1Master::Op::GetStatus;
-    } else if (op == "get_last") {
-      cmd = Uart1Master::Op::GetLast;
-    } else if (op == "auto_measure") {
-      cmd = Uart1Master::Op::AutoMeasure;
-    } else {
-      server_.send(200, "application/json", "{\"ok\":false,\"error\":\"BAD_OP\"}");
+      if (!uartMaster_->enqueue(Uart1Master::Op::GetStatus)) {
+        server_.send(200, "application/json", "{\"ok\":false,\"error\":\"BUSY\"}");
+        return;
+      }
+      server_.send(200, "application/json", "{\"ok\":true}");
+      return;
+    }
+    if (op == "get_last") {
+      if (!uartMaster_->enqueue(Uart1Master::Op::GetLast)) {
+        server_.send(200, "application/json", "{\"ok\":false,\"error\":\"BUSY\"}");
+        return;
+      }
+      server_.send(200, "application/json", "{\"ok\":true}");
+      return;
+    }
+    if (op == "auto_measure") {
+      if (!uartMaster_->enqueue(Uart1Master::Op::GetLast)) {
+        server_.send(200, "application/json", "{\"ok\":false,\"error\":\"BUSY\"}");
+        return;
+      }
+      if (!uartMaster_->enqueue(Uart1Master::Op::AutoMeasure)) {
+        server_.send(200, "application/json", "{\"ok\":false,\"error\":\"BUSY\"}");
+        return;
+      }
+      server_.send(200, "application/json", "{\"ok\":true}");
       return;
     }
 
-    bool queued = uartMaster_->enqueue(cmd);
-    if (!queued) {
-      server_.send(200, "application/json", "{\"ok\":false,\"error\":\"BUSY\"}");
-      return;
-    }
-    server_.send(200, "application/json", "{\"ok\":true}");
+    server_.send(200, "application/json", "{\"ok\":false,\"error\":\"BAD_OP\"}");
   });
 
   server_.on("/api/uart/auto", HTTP_GET, [this]() {
@@ -922,6 +935,11 @@ void ConsoleService::begin() {
   });
 
   server_.on("/api/sd/clear", HTTP_POST, [this]() {
+    bool ok = clearLogsDir();
+    server_.sendHeader("Cache-Control", "no-store, max-age=0");
+    server_.send(200, "application/json", ok ? "{\"ok\":true}" : "{\"ok\":false}");
+  });
+  server_.on("/api/sd/clear", HTTP_GET, [this]() {
     bool ok = clearLogsDir();
     server_.sendHeader("Cache-Control", "no-store, max-age=0");
     server_.send(200, "application/json", ok ? "{\"ok\":true}" : "{\"ok\":false}");

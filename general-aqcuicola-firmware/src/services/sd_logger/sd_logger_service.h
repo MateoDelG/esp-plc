@@ -1,6 +1,8 @@
 #pragma once
 
 #include <Arduino.h>
+#include "freertos/FreeRTOS.h"
+#include "freertos/semphr.h"
 
 class Logger;
 class TimeService;
@@ -19,11 +21,13 @@ class SdLoggerService {
  private:
   bool ensureReady();
   bool ensureLogsDir();
-  bool appendLine(const char* path, const String& line);
+  bool initSd();
+  bool appendLine(const char* path, const String& line, bool waitForMutex);
   String formatTimestamp() const;
 
   Logger& logger_;
   TimeService* timeService_ = nullptr;
+  SemaphoreHandle_t sdMutex_ = nullptr;
   bool ready_ = false;
   bool readyLogged_ = false;
 };
