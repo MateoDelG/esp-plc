@@ -9,6 +9,8 @@
 #include "core/logger.h"
 #include "services/telemetry/telemetry_service.h"
 #include "services/time/time_service.h"
+#include "services/watchdog/watchdog_service.h"
+#include "comms/wifi/wifi_manager.h"
 #include <SD.h>
 
 #include <cmath>
@@ -870,6 +872,193 @@ void ConsoleService::begin() {
     server_.send(200, "application/json", payload);
   });
 
+  server_.on("/api/wdt", HTTP_GET, [this]() {
+    uint16_t swSec = 60;
+    uint16_t hwSec = 90;
+    if (dashboardConfig_) {
+      swSec = dashboardConfig_->wdtSwSeconds;
+      hwSec = dashboardConfig_->wdtHwSeconds;
+    }
+    String payload;
+    payload.reserve(96);
+    payload += "{\"ok\":true,\"swSec\":";
+    payload += String(swSec);
+    payload += ",\"hwSec\":";
+    payload += String(hwSec);
+    payload += "}";
+    server_.sendHeader("Cache-Control", "no-store, max-age=0");
+    server_.send(200, "application/json", payload);
+  });
+
+  server_.on("/api/wdt", HTTP_POST, [this]() {
+    String body = server_.arg("plain");
+
+    auto parseField = [&](const char* key, int current) -> int {
+      int idx = body.indexOf(key);
+      if (idx < 0) {
+        return current;
+      }
+      int colon = body.indexOf(':', idx);
+      if (colon < 0) {
+        return current;
+      }
+      int end = body.indexOf(',', colon);
+      if (end < 0) {
+        end = body.indexOf('}', colon);
+      }
+      if (end < 0) {
+        end = body.length();
+      }
+      String value = body.substring(colon + 1, end);
+      value.replace("\"", "");
+      value.trim();
+      return value.toInt();
+    };
+
+    uint16_t swSec = 60;
+    uint16_t hwSec = 90;
+    if (dashboardConfig_) {
+      swSec = dashboardConfig_->wdtSwSeconds;
+      hwSec = dashboardConfig_->wdtHwSeconds;
+    }
+    int swRaw = parseField("swSec", swSec);
+    int hwRaw = parseField("hwSec", hwSec);
+    uint16_t swNew = clampU16Max(swRaw, 30, 3600);
+    uint16_t hwNew = clampU16Max(hwRaw, 30, 3600);
+    if (hwNew < swNew) {
+      hwNew = swNew;
+    }
+
+    if (dashboardConfig_) {
+      dashboardConfig_->wdtSwSeconds = swNew;
+      dashboardConfig_->wdtHwSeconds = hwNew;
+      saveDashboardConfig(*dashboardConfig_, logger_);
+    }
+    if (watchdogService_) {
+      watchdogService_->setTimeouts(swNew, hwNew);
+    }
+
+    String payload;
+    payload.reserve(96);
+    payload += "{\"ok\":true,\"swSec\":";
+    payload += String(swNew);
+    payload += ",\"hwSec\":";
+    payload += String(hwNew);
+    payload += "}";
+    server_.sendHeader("Cache-Control", "no-store, max-age=0");
+    server_.send(200, "application/json", payload);
+  });
+
+  server_.on("/api/wifi", HTTP_GET, [this]() {
+    String ssid;
+    String pass;
+    bool autoReconnect = true;
+    if (dashboardConfig_) {
+      ssid = dashboardConfig_->wifiSsid;
+      pass = dashboardConfig_->wifiPass;
+      autoReconnect = dashboardConfig_->wifiAutoReconnect;
+    }
+    String payload;
+    payload.reserve(160);
+    payload += "{\"ok\":true,\"ssid\":\"";
+    payload += ssid;
+    payload += "\",\"pass\":\"";
+    payload += pass;
+    payload += "\",\"autoReconnect\":";
+    payload += autoReconnect ? "true" : "false";
+    payload += "}";
+    server_.sendHeader("Cache-Control", "no-store, max-age=0");
+    server_.send(200, "application/json", payload);
+  });
+
+  server_.on("/api/wifi", HTTP_POST, [this]() {
+    String body = server_.arg("plain");
+
+    auto parseStringField = [&](const char* key, const String& current) -> String {
+      int idx = body.indexOf(key);
+      if (idx < 0) {
+        return current;
+      }
+      int colon = body.indexOf(':', idx);
+      if (colon < 0) {
+        return current;
+      }
+      int firstQuote = body.indexOf('"', colon + 1);
+      if (firstQuote < 0) {
+        return current;
+      }
+      int secondQuote = body.indexOf('"', firstQuote + 1);
+      if (secondQuote < 0) {
+        return current;
+      }
+      String value = body.substring(firstQuote + 1, secondQuote);
+      value.trim();
+      return value;
+    };
+
+    auto parseIntField = [&](const char* key, int current) -> int {
+      int idx = body.indexOf(key);
+      if (idx < 0) {
+        return current;
+      }
+      int colon = body.indexOf(':', idx);
+      if (colon < 0) {
+        return current;
+      }
+      int end = body.indexOf(',', colon);
+      if (end < 0) {
+        end = body.indexOf('}', colon);
+      }
+      if (end < 0) {
+        end = body.length();
+      }
+      String value = body.substring(colon + 1, end);
+      value.replace("\"", "");
+      value.trim();
+      return value.toInt();
+    };
+
+    String currentSsid = dashboardConfig_ ? dashboardConfig_->wifiSsid : String();
+    String currentPass = dashboardConfig_ ? dashboardConfig_->wifiPass : String();
+    bool currentAuto = dashboardConfig_ ? dashboardConfig_->wifiAutoReconnect : true;
+    String ssid = parseStringField("ssid", currentSsid);
+    String pass = parseStringField("pass", currentPass);
+    int autoVal = parseIntField("autoReconnect", currentAuto ? 1 : 0);
+    bool autoReconnect = autoVal != 0;
+
+    if (ssid.length() > 32) {
+      ssid = ssid.substring(0, 32);
+    }
+    if (pass.length() > 64) {
+      pass = pass.substring(0, 64);
+    }
+
+    bool connected = false;
+    if (wifiManager_) {
+      connected = wifiManager_->connectOrStartAp(ssid, pass);
+    }
+    if (dashboardConfig_) {
+      dashboardConfig_->wifiSsid = ssid;
+      dashboardConfig_->wifiPass = pass;
+      dashboardConfig_->wifiAutoReconnect = autoReconnect;
+      saveDashboardConfig(*dashboardConfig_, logger_);
+    }
+
+    String payload;
+    payload.reserve(160);
+    payload += "{\"ok\":true,\"connected\":";
+    payload += connected ? "true" : "false";
+    payload += ",\"ssid\":\"";
+    payload += ssid;
+    payload += "\",\"pass\":\"";
+    payload += pass;
+    payload += "\",\"autoReconnect\":";
+    payload += autoReconnect ? "true" : "false";
+    payload += "}";
+    server_.sendHeader("Cache-Control", "no-store, max-age=0");
+    server_.send(200, "application/json", payload);
+  });
+
   server_.on("/api/time", HTTP_GET, [this]() {
     String payload;
     payload.reserve(160);
@@ -1047,6 +1236,14 @@ void ConsoleService::setTelemetryService(TelemetryService* service) {
 
 void ConsoleService::setTimeService(TimeService* service) {
   timeService_ = service;
+}
+
+void ConsoleService::setWatchdogService(WatchdogService* service) {
+  watchdogService_ = service;
+}
+
+void ConsoleService::setWifiManager(WifiManager* manager) {
+  wifiManager_ = manager;
 }
 
 

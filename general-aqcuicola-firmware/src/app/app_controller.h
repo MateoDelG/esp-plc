@@ -16,6 +16,7 @@
 #include "config/dashboard_config.h"
 #include "services/time/time_service.h"
 #include "services/sd_logger/sd_logger_service.h"
+#include "services/watchdog/watchdog_service.h"
 
 class AppController {
  public:
@@ -43,6 +44,7 @@ class AppController {
   EspNowService espNowService_;
   TimeService timeService_;
   SdLoggerService sdLoggerService_;
+  WatchdogService watchdog_;
   DashboardConfig dashboardConfig_;
   DeviceStatus status_;
   AppState state_;

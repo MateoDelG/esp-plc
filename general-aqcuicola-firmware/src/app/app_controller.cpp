@@ -19,28 +19,37 @@ AppController::AppController()
     espNowService_(logger_),
     timeService_(logger_, ubidotsService_),
     sdLoggerService_(logger_),
+    watchdog_(logger_),
     status_(),
     state_(AppState::Boot) {}
 
 void AppController::begin() {
   logger_.begin(kSerialBaud);
   logger_.info("boot");
+  watchdog_.begin();
+
+  bool configOk = loadDashboardConfig(dashboardConfig_, &logger_);
+  if (!configOk) {
+    logger_.warn("cfg: dashboard defaults");
+  }
+  if (dashboardConfig_.wifiSsid.length() > 0) {
+    wifiManager_.setCredentials(dashboardConfig_.wifiSsid, dashboardConfig_.wifiPass);
+  }
 
   setState(AppState::ConnectingWifi);
-  bool wifiOk = wifiManager_.begin();
+  wifiManager_.begin();
+  bool wifiOk = wifiManager_.connectOrStartAp(dashboardConfig_.wifiSsid,
+                                              dashboardConfig_.wifiPass);
   status_.lastWifiAttemptOk = wifiOk;
   status_.wifiConnected = wifiManager_.isConnected();
   status_.localIp = wifiManager_.localIp();
 
-  if (!status_.wifiConnected) {
+  if (!status_.wifiConnected && !wifiManager_.isApActive()) {
     setState(AppState::Error);
     logger_.error("wifi: not connected");
     return;
   }
 
-  if (!loadDashboardConfig(dashboardConfig_, &logger_)) {
-    logger_.warn("cfg: dashboard defaults");
-  }
   blowerThresholdA0_ = dashboardConfig_.blowerThresholdA0;
   blowerThresholdA1_ = dashboardConfig_.blowerThresholdA1;
   blowerNotifyDelaySec_ = dashboardConfig_.blowerNotifyDelaySec;
@@ -53,6 +62,7 @@ void AppController::begin() {
     static_cast<uint32_t>(dashboardConfig_.espNowAutoIntervalMin) * 60000U;
   telemetryService_.setPublishIntervalMs(
     static_cast<uint32_t>(dashboardConfig_.ubidotsPublishIntervalMin) * 60000U);
+  watchdog_.setTimeouts(dashboardConfig_.wdtSwSeconds, dashboardConfig_.wdtHwSeconds);
   analogService_.setEnabledMask(dashboardConfig_.adsEnabledMask);
 
   consoleService_.begin();
@@ -62,6 +72,8 @@ void AppController::begin() {
   consoleService_.setDashboardConfig(&dashboardConfig_);
   consoleService_.setTelemetryService(&telemetryService_);
   consoleService_.setTimeService(&timeService_);
+  consoleService_.setWatchdogService(&watchdog_);
+  consoleService_.setWifiManager(&wifiManager_);
   consoleService_.setAnalogControl(&analogService_);
   consoleService_.setBlowerThresholdRefs(&blowerThresholdA0_, &blowerThresholdA1_);
   consoleService_.setBlowerDelayRef(&blowerNotifyDelaySec_);
@@ -117,7 +129,9 @@ void AppController::begin() {
 }
 
 void AppController::update() {
+  watchdog_.feed();
   ubidotsService_.update();
+  wifiManager_.update(dashboardConfig_.wifiAutoReconnect);
   if (status_.wifiConnected && otaService_.isReady()) {
     otaService_.update();
   }
@@ -192,12 +206,12 @@ void AppController::update() {
     if (blowerAlarmCycleActive_) {
       uint32_t elapsed = nowMs - blowerAlarmPhaseStartMs_;
       if (blowerAlarmPulseOn_) {
-        if (elapsed >= 10000U) {
+        if (elapsed >= 3500U) {
           blowerAlarmPulseOn_ = false;
           blowerAlarmPhaseStartMs_ = nowMs;
         }
       } else {
-        if (elapsed >= 25000U) {
+        if (elapsed >= 3500U) {
           blowerAlarmPulseOn_ = true;
           blowerAlarmPhaseStartMs_ = nowMs;
         }

@@ -19,6 +19,8 @@ class Logger;
 struct DashboardConfig;
 class TelemetryService;
 class TimeService;
+class WatchdogService;
+class WifiManager;
 
 class ConsoleService {
  public:
@@ -39,6 +41,8 @@ class ConsoleService {
   void setEspNowService(EspNowService* service);
   void setTelemetryService(TelemetryService* service);
   void setTimeService(TimeService* service);
+  void setWatchdogService(WatchdogService* service);
+  void setWifiManager(WifiManager* manager);
   void setUartAutoRefs(bool* enabled, uint32_t* intervalMs, uint32_t* lastMs);
   void setEspNowAutoRefs(bool* enabled, uint32_t* intervalMs, uint32_t* lastMs);
   void setLogger(Logger* logger);
@@ -80,6 +84,8 @@ class ConsoleService {
   EspNowService* espNowService_ = nullptr;
   TelemetryService* telemetryService_ = nullptr;
   TimeService* timeService_ = nullptr;
+  WatchdogService* watchdogService_ = nullptr;
+  WifiManager* wifiManager_ = nullptr;
   Logger* logger_ = nullptr;
   DashboardConfig* dashboardConfig_ = nullptr;
   bool uartAutoEnabled_ = false;
