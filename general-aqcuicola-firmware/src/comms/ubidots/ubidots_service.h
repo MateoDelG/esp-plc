@@ -41,6 +41,9 @@ class UbidotsService {
   bool ensureConnected();
   bool ensureSubscribed();
   void pushConsoleMessage(const String& topic, const String& payload);
+  void handlePublishFailure(const char* label);
+  void handleMqttConnectFailure();
+  void resetAccqBackoff();
   bool lockMqtt(const char* label);
   void unlockMqtt();
   void checkUrcOverflow();
@@ -66,6 +69,9 @@ class UbidotsService {
   bool publishDisabledLogged_ = false;
   uint32_t lastPollMs_ = 0;
   uint32_t lastConnectAttemptMs_ = 0;
+  uint32_t connectBackoffMs_ = 0;
+  uint8_t accqFailCount_ = 0;
+  uint32_t accqFailStartMs_ = 0;
   TaskHandle_t modemTask_ = nullptr;
   TaskHandle_t rxTask_ = nullptr;
   volatile bool rxTaskActive_ = false;

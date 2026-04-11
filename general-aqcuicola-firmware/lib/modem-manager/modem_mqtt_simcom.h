@@ -7,6 +7,7 @@
 #include "modem_mqtt_interface.h"
 
 class ModemManager;
+struct AtResult;
 
 class SimcomMqttClient : public IModemMqtt {
  public:
@@ -32,6 +33,12 @@ class SimcomMqttClient : public IModemMqtt {
   bool connectBroker(const char* host, uint16_t port, const char* user,
                      const char* pass, bool useTls);
   void resetService();
+  void markPublishFailure(const char* step);
+  bool execAccq(const char* clientId, AtResult& out);
+  bool performAccqRecovery(const char* clientId, bool full);
+  bool queryAccqOccupied(uint8_t index, bool& occupied);
+  void recordAccqFailure();
+  void resetAccqFailures();
 
   enum class RxState : uint8_t {
     Idle = 0,
@@ -46,6 +53,11 @@ class SimcomMqttClient : public IModemMqtt {
   bool connected_ = false;
   bool tlsConfigured_ = false;
   bool needsReset_ = false;
+  uint8_t serverType_ = 0;
+  uint8_t accqFailCount_ = 0;
+  uint32_t accqFailStartMs_ = 0;
+  uint32_t accqNextAttemptMs_ = 0;
+  uint32_t accqBackoffMs_ = 2000;
   RxState rxState_ = RxState::Idle;
   uint16_t rxTopicLen_ = 0;
   uint16_t rxPayloadLen_ = 0;

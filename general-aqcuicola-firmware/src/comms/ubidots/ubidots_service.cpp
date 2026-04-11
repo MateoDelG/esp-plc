@@ -11,7 +11,9 @@
 #endif
 
 UbidotsService::UbidotsService(Logger& logger)
-  : logger_(logger), modem_(makeModemConfig(logger_)) {}
+  : logger_(logger), modem_(makeModemConfig(logger_)) {
+  connectBackoffMs_ = kUbiReconnectIntervalMs;
+}
 
 bool UbidotsService::begin() {
   if (modemTask_ != nullptr) {
@@ -125,6 +127,7 @@ bool UbidotsService::publishTelemetry(const TelemetryPacket& data) {
     logger_.info("ubidots: publish ok");
   } else {
     logger_.warn("ubidots: publish failed");
+    handlePublishFailure("publish");
   }
   return ok;
 }
@@ -158,6 +161,7 @@ bool UbidotsService::publishBlowersState(uint8_t value) {
     logger_.info("ubidots: blowers state published");
   } else {
     logger_.warn("ubidots: blowers publish failed");
+    handlePublishFailure("publish-blowers");
   }
   return ok;
 }
@@ -191,6 +195,7 @@ bool UbidotsService::publishConsoleValue(uint16_t value) {
     logger_.info("ubidots: console value published");
   } else {
     logger_.warn("ubidots: console publish failed");
+    handlePublishFailure("publish-console");
   }
   return ok;
 }
@@ -362,6 +367,56 @@ void UbidotsService::pushConsoleMessage(const String& topic,
   ++consoleCount_;
 }
 
+void UbidotsService::handlePublishFailure(const char* label) {
+  if (otaMode_ || otaActive_ || !modemReady_ || !dataReady_) {
+    return;
+  }
+  mqttBusy_ = true;
+  if (lockMqtt(label)) {
+    logger_.warn("ubidots: mqtt disconnect (publish failure)");
+    modem_.mqtt().disconnect();
+    unlockMqtt();
+  } else {
+    logger_.warn("ubidots: mqtt disconnect skipped, locked");
+  }
+  consoleSubscribed_ = false;
+  mqttBusy_ = false;
+}
+
+void UbidotsService::handleMqttConnectFailure() {
+  ModemError err = modem_.lastError();
+  if (err.errorCode != ModemErrorCode::MqttAcquireFailed) {
+    return;
+  }
+
+  uint32_t now = millis();
+  if (accqFailStartMs_ == 0) {
+    accqFailStartMs_ = now;
+  }
+  if (accqFailCount_ < 255) {
+    ++accqFailCount_;
+  }
+
+  if (accqFailCount_ == 1) {
+    connectBackoffMs_ = 2000;
+  } else if (accqFailCount_ == 2) {
+    connectBackoffMs_ = 5000;
+  } else {
+    connectBackoffMs_ = 10000;
+  }
+
+  if (now - accqFailStartMs_ >= 300000UL) {
+    logger_.error("ubidots: mqtt accq failed 5 min, restarting");
+    ESP.restart();
+  }
+}
+
+void UbidotsService::resetAccqBackoff() {
+  accqFailCount_ = 0;
+  accqFailStartMs_ = 0;
+  connectBackoffMs_ = kUbiReconnectIntervalMs;
+}
+
 void UbidotsService::modemTaskEntry(void* param) {
   auto* self = static_cast<UbidotsService*>(param);
   if (self) {
@@ -430,7 +485,7 @@ void UbidotsService::modemTaskLoop() {
 
     if (!modem_.mqtt().isConnected()) {
       uint32_t now = millis();
-      if (now - lastConnectAttemptMs_ < kUbiReconnectIntervalMs) {
+      if (now - lastConnectAttemptMs_ < connectBackoffMs_) {
         vTaskDelay(pdMS_TO_TICKS(500));
         continue;
       }
@@ -468,6 +523,7 @@ void UbidotsService::modemTaskLoop() {
 
       if (connected) {
         logger_.info("ubidots: mqtt connected");
+        resetAccqBackoff();
         String topic = ubidotsConsoleTopic();
         if (lockMqtt("subscribe")) {
           consoleSubscribed_ = modem_.mqtt().subscribe(topic.c_str(), 1);
@@ -497,6 +553,7 @@ void UbidotsService::modemTaskLoop() {
       } else {
         logger_.warn("ubidots: mqtt connect failed");
         consoleSubscribed_ = false;
+        handleMqttConnectFailure();
       }
       mqttBusy_ = false;
     }

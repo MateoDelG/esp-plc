@@ -114,6 +114,19 @@ void SimcomMqttClient::resetService() {
   modem_.idle(1500);
 }
 
+void SimcomMqttClient::markPublishFailure(const char* step) {
+  if (step && strlen(step) > 0) {
+    modem_.logWarn("mqtt", String("publish failure at ") + step + ", force reset");
+  } else {
+    modem_.logWarn("mqtt", "publish failure, force reset");
+  }
+  connected_ = false;
+  acquired_ = false;
+  started_ = false;
+  tlsConfigured_ = false;
+  needsReset_ = true;
+}
+
 bool SimcomMqttClient::ensureStarted() {
   if (started_) {
     return true;
@@ -186,14 +199,26 @@ bool SimcomMqttClient::acquire(const char* clientId) {
     return true;
   }
 
-  AtResult res = modem_.at().exec(10000L, GF("+CMQTTACCQ=0,\""), clientId,
-                                  GF("\",1"));
-  if (res.ok || res.raw.indexOf("+CMQTTACCQ: 0,0") >= 0) {
+  if (accqNextAttemptMs_ != 0 && millis() < accqNextAttemptMs_) {
+    return false;
+  }
+
+  AtResult res;
+  if (execAccq(clientId, res)) {
     acquired_ = true;
+    resetAccqFailures();
     return true;
   }
 
   modem_.logWarn("mqtt", "accq raw: " + res.raw);
+  recordAccqFailure();
+  bool fullRecovery = accqFailCount_ >= 3;
+  if (performAccqRecovery(clientId, fullRecovery)) {
+    resetAccqFailures();
+    return true;
+  }
+
+  needsReset_ = true;
   return modem_.fail("mqtt", ModemErrorCode::MqttAcquireFailed,
                      "mqtt accq failed", modem_.state());
 }
@@ -208,6 +233,8 @@ bool SimcomMqttClient::connect(const char* host, uint16_t port,
   if (connected_) {
     return true;
   }
+
+  serverType_ = useTls ? 1 : 0;
 
   if (!ensureStarted()) {
     return modem_.fail("mqtt", ModemErrorCode::MqttStartFailed,
@@ -300,6 +327,8 @@ bool SimcomMqttClient::ensureConnected(const char* host, uint16_t port,
     return true;
   }
 
+  serverType_ = useTls ? 1 : 0;
+
   if (!ensureStarted()) {
     return modem_.fail("mqtt", ModemErrorCode::MqttStartFailed,
                        "start failed", modem_.state());
@@ -338,6 +367,7 @@ bool SimcomMqttClient::publish(const char* topic, const char* payload, int qos,
 
   if (!modem_.at().execPromptedData(5000L, topic, topicLen,
                                     GF("+CMQTTTOPIC=0,"), topicLen)) {
+    markPublishFailure("topic");
     return modem_.fail("mqtt", ModemErrorCode::MqttPublishFailed,
                        "topic payload failed", modem_.state());
   }
@@ -346,6 +376,7 @@ bool SimcomMqttClient::publish(const char* topic, const char* payload, int qos,
 
   if (!modem_.at().execPromptedData(5000L, payload, payloadLen,
                                     GF("+CMQTTPAYLOAD=0,"), payloadLen)) {
+    markPublishFailure("payload");
     return modem_.fail("mqtt", ModemErrorCode::MqttPublishFailed,
                        "payload write failed", modem_.state());
   }
@@ -376,10 +407,141 @@ bool SimcomMqttClient::publish(const char* topic, const char* payload, int qos,
   });
 
   if (!pubOk) {
+    markPublishFailure("publish");
     return modem_.fail("mqtt", ModemErrorCode::MqttPublishFailed,
                        "publish urc timeout", modem_.state());
   }
   return true;
+}
+
+bool SimcomMqttClient::execAccq(const char* clientId, AtResult& out) {
+  out = modem_.at().exec(10000L, GF("+CMQTTACCQ=0,\""), clientId, GF("\","),
+                         serverType_);
+  if (out.ok || out.raw.indexOf("+CMQTTACCQ: 0,0") >= 0) {
+    return true;
+  }
+  return false;
+}
+
+void SimcomMqttClient::recordAccqFailure() {
+  uint32_t now = millis();
+  if (accqFailStartMs_ == 0) {
+    accqFailStartMs_ = now;
+  }
+  if (accqFailCount_ < 255) {
+    ++accqFailCount_;
+  }
+  if (accqFailCount_ == 1) {
+    accqBackoffMs_ = 2000;
+  } else if (accqFailCount_ == 2) {
+    accqBackoffMs_ = 5000;
+  } else {
+    accqBackoffMs_ = 10000;
+  }
+  accqNextAttemptMs_ = now + accqBackoffMs_;
+}
+
+void SimcomMqttClient::resetAccqFailures() {
+  accqFailCount_ = 0;
+  accqFailStartMs_ = 0;
+  accqBackoffMs_ = 2000;
+  accqNextAttemptMs_ = 0;
+}
+
+bool SimcomMqttClient::queryAccqOccupied(uint8_t index, bool& occupied) {
+  occupied = false;
+  AtResult res = modem_.at().exec(3000L, GF("+CMQTTACCQ?"));
+  if (!res.ok && res.raw.length() == 0) {
+    return false;
+  }
+
+  int start = 0;
+  while (start < res.raw.length()) {
+    int end = res.raw.indexOf('\n', start);
+    if (end < 0) {
+      end = res.raw.length();
+    }
+    String line = res.raw.substring(start, end);
+    line.trim();
+    start = end + 1;
+    if (!line.startsWith("+CMQTTACCQ:")) {
+      continue;
+    }
+    int colon = line.indexOf(':');
+    if (colon < 0) {
+      continue;
+    }
+    String rest = line.substring(colon + 1);
+    rest.trim();
+    int comma = rest.indexOf(',');
+    if (comma < 0) {
+      continue;
+    }
+    int idx = rest.substring(0, comma).toInt();
+    if (idx != static_cast<int>(index)) {
+      continue;
+    }
+    int firstQuote = rest.indexOf('"');
+    int secondQuote = rest.indexOf('"', firstQuote + 1);
+    if (firstQuote >= 0 && secondQuote > firstQuote) {
+      String clientId = rest.substring(firstQuote + 1, secondQuote);
+      occupied = clientId.length() > 0;
+    } else {
+      occupied = false;
+    }
+    return true;
+  }
+  return false;
+}
+
+bool SimcomMqttClient::performAccqRecovery(const char* clientId, bool full) {
+  if (full) {
+    modem_.logWarn("mqtt", "accq recovery: full");
+    bool occupied1 = false;
+    if (queryAccqOccupied(1, occupied1) && occupied1) {
+      modem_.logWarn("mqtt", "accq recovery: rel index 1");
+      modem_.at().exec(3000L, GF("+CMQTTREL=1"));
+    }
+    modem_.at().exec(3000L, GF("+CMQTTDISC=0,120"));
+  } else {
+    modem_.logWarn("mqtt", "accq recovery: quick");
+  }
+
+  modem_.at().exec(3000L, GF("+CMQTTREL=0"));
+  modem_.at().exec(3000L, GF("+CMQTTSTOP"));
+
+  started_ = false;
+  acquired_ = false;
+  connected_ = false;
+  tlsConfigured_ = false;
+
+  modem_.at().exec(10000L, GF("+CMQTTSTART"));
+  String urcLine;
+  if (modem_.at().waitUrc(UrcType::MqttStart, 10000UL, urcLine)) {
+    int code = -1;
+    int colon = urcLine.indexOf(':');
+    if (colon >= 0) {
+      String codeStr = urcLine.substring(colon + 1);
+      codeStr.trim();
+      code = codeStr.toInt();
+    }
+    if (code == 0 || code == 23) {
+      started_ = true;
+    }
+  }
+
+  if (!started_) {
+    modem_.logWarn("mqtt", "accq recovery: start failed");
+    return false;
+  }
+
+  AtResult accqRes;
+  if (execAccq(clientId, accqRes)) {
+    acquired_ = true;
+    return true;
+  }
+  modem_.logWarn("mqtt", "accq recovery failed: " + accqRes.raw);
+  return false;
 }
 
 bool SimcomMqttClient::subscribe(const char* topic, int qos) {
