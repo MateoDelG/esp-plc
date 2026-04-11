@@ -171,7 +171,7 @@ bool SimcomMqttClient::ensureStarted() {
         codeStr.trim();
         code = codeStr.toInt();
       }
-      if (code == 0 || code == 23) {
+      if (code == 0 || code == 1 || code == 23) {
         started_ = true;
         modem_.transitionTo(ModemState::MqttStarted, "mqtt started");
         return true;
@@ -525,7 +525,7 @@ bool SimcomMqttClient::performAccqRecovery(const char* clientId, bool full) {
       codeStr.trim();
       code = codeStr.toInt();
     }
-    if (code == 0 || code == 23) {
+    if (code == 0 || code == 1 || code == 23) {
       started_ = true;
     }
   }
