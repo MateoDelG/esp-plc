@@ -19,6 +19,7 @@
 #include "services/espnow/espnow_service.h"
 #include "comms/uart1_master/uart1_master.h"
 #include "services/pcf_io/pcf_io_service.h"
+#include "sd_shared.h"
 
 namespace {
 float clampFloat(float value, float minValue, float maxValue) {
@@ -58,6 +59,23 @@ uint8_t clampU8(int value, uint8_t minValue, uint8_t maxValue) {
   return static_cast<uint8_t>(value);
 }
 
+struct SdLockGuard {
+  SemaphoreHandle_t mutex = nullptr;
+  bool locked = false;
+  SdLockGuard() {
+    mutex = sdSharedMutex();
+    if (mutex && xSemaphoreTake(mutex, portMAX_DELAY) == pdTRUE) {
+      locked = true;
+    }
+  }
+  ~SdLockGuard() {
+    if (locked) {
+      xSemaphoreGive(mutex);
+    }
+  }
+  bool ok() const { return locked; }
+};
+
 uint16_t clampU16Max(int value, uint16_t minValue, uint16_t maxValue) {
   if (value < static_cast<int>(minValue)) {
     return minValue;
@@ -69,6 +87,10 @@ uint16_t clampU16Max(int value, uint16_t minValue, uint16_t maxValue) {
 }
 
 bool readLastLines(const char* path, uint8_t maxLines, String& out) {
+  SdLockGuard lock;
+  if (!lock.ok()) {
+    return false;
+  }
   File file = SD.open(path, FILE_READ);
   if (!file) {
     return false;
@@ -107,6 +129,10 @@ done:
 }
 
 bool clearLogsDir() {
+  SdLockGuard lock;
+  if (!lock.ok()) {
+    return false;
+  }
   if (!SD.exists("/logs")) {
     return SD.mkdir("/logs");
   }

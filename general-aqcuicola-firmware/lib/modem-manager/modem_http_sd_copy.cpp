@@ -2,6 +2,7 @@
 
 #include <SD.h>
 
+#include "sd_shared.h"
 #include "modem_http_storage.h"
 #include "modem_manager.h"
 
@@ -9,6 +10,28 @@ static const size_t kFsProgressStep = 4096;
 static const size_t kFsReadChunkMin = 64;
 static const size_t kFsReadChunkDefault = 256;
 static const size_t kFsReadChunkMax = 1024;
+
+struct SdLockGuard {
+  SemaphoreHandle_t mutex = nullptr;
+  bool locked = false;
+  ~SdLockGuard() { release(); }
+  bool acquire() {
+    if (!mutex) {
+      mutex = sdSharedMutex();
+    }
+    if (mutex && xSemaphoreTake(mutex, portMAX_DELAY) == pdTRUE) {
+      locked = true;
+      return true;
+    }
+    return false;
+  }
+  void release() {
+    if (locked) {
+      xSemaphoreGive(mutex);
+      locked = false;
+    }
+  }
+};
 
 size_t httpClampFsReadChunk(size_t requested) {
   size_t fsReadChunkSize = requested > 0 ? requested : kFsReadChunkDefault;
@@ -26,6 +49,10 @@ bool httpCopyModemFileToSd(ModemManager& modem, const char* filename,
                            size_t fsReadChunkSize, ModemLogSink logSink,
                            bool (*sdRecoverFn)(), size_t fsFlushThreshold,
                            bool (*sdRemountFn)()) {
+  SdLockGuard lock;
+  if (!lock.acquire()) {
+    return false;
+  }
   auto logLine = [&](const String& line) {
     if (logSink) {
       logSink(false, line);
@@ -206,7 +233,12 @@ bool httpCopyModemFileToSd(ModemManager& modem, const char* filename,
       bool remountOk = false;
       if (sdRecoverFn) {
         logLine("remount after write mismatch");
+        // Callbacks may remount SD and must run outside the shared mutex.
+        lock.release();
         remountOk = sdRecoverFn();
+        if (!lock.acquire()) {
+          return false;
+        }
         logLine(String("remount ") + (remountOk ? "ok" : "fail"));
       }
       if (remountOk) {
@@ -264,7 +296,12 @@ bool httpCopyModemFileToSd(ModemManager& modem, const char* filename,
     if (sdRemountFn) {
       logLine("remount before temp verify");
       logLine("remount begin");
+      // Callbacks may remount SD and must run outside the shared mutex.
+      lock.release();
       bool remountOk = sdRemountFn();
+      if (!lock.acquire()) {
+        return false;
+      }
       logLine(String("remount ") + (remountOk ? "ok" : "failed"));
       if (remountOk) {
         check = SD.open(sdTempPath, FILE_READ);
@@ -307,8 +344,10 @@ bool httpCopyModemFileToSd(ModemManager& modem, const char* filename,
     logLine("fail: rename temp to final");
     cleanupTemp(false);
     logLine("copy aborted");
+    lock.release();
     return false;
   }
   logLine("modem file copy success");
+  lock.release();
   return true;
 }

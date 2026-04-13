@@ -39,6 +39,9 @@ class ModemMqtt {
   void disconnect();
 
   bool isConnected() const { return impl_->isConnected(); }
+  bool needsModemRestart() const { return simcom_.needsModemRestart(); }
+  bool needsEspRestart() const { return simcom_.needsEspRestart(); }
+  void clearEscalation() { simcom_.clearEscalation(); }
 
  private:
   ModemManager& modem_;

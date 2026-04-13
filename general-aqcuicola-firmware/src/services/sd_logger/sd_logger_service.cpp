@@ -4,6 +4,7 @@
 #include <SPI.h>
 
 #include "core/logger.h"
+#include "sd_shared.h"
 #include "services/time/time_service.h"
 
 namespace {
@@ -21,6 +22,7 @@ namespace {
 #endif
 
 constexpr uint8_t kSdCsPin = SD_CS;
+constexpr uint32_t kSdSpiHz = 100000;
 constexpr char kLogsDir[] = "/logs";
 constexpr char kUartLogPath[] = "/logs/uart_ph_o2_temp.jsonl";
 constexpr char kLevelLogPath[] = "/logs/level_temp.jsonl";
@@ -34,16 +36,28 @@ SPIClass& sdSpi() {
 SdLoggerService::SdLoggerService(Logger& logger) : logger_(logger) {}
 
 void SdLoggerService::begin() {
-  if (!sdMutex_) {
-    sdMutex_ = xSemaphoreCreateMutex();
+  SemaphoreHandle_t mutex = sdSharedMutex();
+  if (!mutex) {
+    logger_.warn("sd: mutex create failed");
+    ready_ = false;
+    readyLogged_ = true;
+    return;
+  }
+  if (xSemaphoreTake(mutex, portMAX_DELAY) != pdTRUE) {
+    logger_.warn("sd: mutex take failed");
+    ready_ = false;
+    readyLogged_ = true;
+    return;
   }
   ready_ = initSd();
   if (!ready_) {
     logger_.warn("sd: init failed");
     readyLogged_ = true;
+    xSemaphoreGive(mutex);
     return;
   }
   ensureLogsDir();
+  xSemaphoreGive(mutex);
   logger_.info("sd: ready");
 }
 
@@ -76,43 +90,44 @@ bool SdLoggerService::ensureLogsDir() {
 bool SdLoggerService::initSd() {
   SPIClass& spi = sdSpi();
   spi.begin(SD_SCLK, SD_MISO, SD_MOSI, SD_CS);
-  return SD.begin(kSdCsPin, spi);
+  spi.setFrequency(kSdSpiHz);
+  return SD.begin(kSdCsPin, spi, kSdSpiHz);
 }
 
 bool SdLoggerService::appendLine(const char* path, const String& line,
                                  bool waitForMutex) {
-  if (!sdMutex_) {
+  SemaphoreHandle_t mutex = sdSharedMutex();
+  if (!mutex) {
     return false;
   }
   if (waitForMutex) {
-    xSemaphoreTake(sdMutex_, portMAX_DELAY);
+    if (xSemaphoreTake(mutex, portMAX_DELAY) != pdTRUE) {
+      return false;
+    }
   } else {
-    if (xSemaphoreTake(sdMutex_, 0) != pdTRUE) {
+    if (xSemaphoreTake(mutex, 0) != pdTRUE) {
       return false;
     }
   }
 
   if (!ensureLogsDir()) {
-    xSemaphoreGive(sdMutex_);
+    xSemaphoreGive(mutex);
     return false;
   }
   File file = SD.open(path, FILE_APPEND);
   if (!file) {
-    SD.end();
-    ready_ = initSd();
-    if (ready_) {
-      ensureLogsDir();
-      file = SD.open(path, FILE_APPEND);
-    }
-    if (!file) {
-      logger_.warn("sd: open failed");
-      xSemaphoreGive(sdMutex_);
-      return false;
-    }
+    // Avoid SD.end() or re-init here; other modules may be using SD.
+    logger_.warn("sd: open failed");
+    xSemaphoreGive(mutex);
+    return false;
   }
-  file.println(line);
+  size_t written = file.println(line);
   file.close();
-  xSemaphoreGive(sdMutex_);
+  xSemaphoreGive(mutex);
+  if (written == 0) {
+    logger_.warn("sd: write failed");
+    return false;
+  }
   return true;
 }
 

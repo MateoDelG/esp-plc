@@ -77,6 +77,9 @@ class UbidotsService {
   volatile bool rxTaskActive_ = false;
   volatile bool rxPaused_ = false;
   SemaphoreHandle_t mqttMutex_ = nullptr;
+  bool modemRestartPending_ = false;
+  bool espRestartPending_ = false;
+  uint32_t modemRestartStartMs_ = 0;
 
   static void modemTaskEntry(void* param);
   void modemTaskLoop();

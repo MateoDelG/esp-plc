@@ -2,6 +2,7 @@
 
 #include <SD.h>
 
+#include "sd_shared.h"
 #include "modem_error.h"
 #include "modem_http_sd_copy.h"
 #include "modem_http_session.h"
@@ -10,6 +11,23 @@
 #include "modem_parsers.h"
 
 static const char kModemLocalPrefix[] = "C:/";
+
+struct SdLockGuard {
+  SemaphoreHandle_t mutex = nullptr;
+  bool locked = false;
+  SdLockGuard() {
+    mutex = sdSharedMutex();
+    if (mutex && xSemaphoreTake(mutex, portMAX_DELAY) == pdTRUE) {
+      locked = true;
+    }
+  }
+  ~SdLockGuard() {
+    if (locked) {
+      xSemaphoreGive(mutex);
+    }
+  }
+  bool ok() const { return locked; }
+};
 
 ModemHttp::ModemHttp(ModemManager& modem) : modem_(modem) {}
 
@@ -621,6 +639,10 @@ bool ModemHttp::downloadToModemFile(const char* url, const char* modemPath,
 
 bool ModemHttp::verifyFileOnSd(const char* path, size_t expectedSize,
                                size_t previewBytes, ModemLogSink logSink) {
+  SdLockGuard lock;
+  if (!lock.ok()) {
+    return false;
+  }
   auto logLine = [&](const String& line) {
     if (logSink) {
       logSink(false, line);

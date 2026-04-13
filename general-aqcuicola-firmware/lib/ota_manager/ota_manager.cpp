@@ -4,9 +4,28 @@
 #include <SD.h>
 #include <Update.h>
 
+#include "sd_shared.h"
+
 static const size_t kOtaProgressBytesStep = 32768;
 static const uint8_t kOtaProgressPercentStep = 5;
 static const uint8_t kEspImageMagic = 0xE9;
+
+struct SdLockGuard {
+  SemaphoreHandle_t mutex = nullptr;
+  bool locked = false;
+  SdLockGuard() {
+    mutex = sdSharedMutex();
+    if (mutex && xSemaphoreTake(mutex, portMAX_DELAY) == pdTRUE) {
+      locked = true;
+    }
+  }
+  ~SdLockGuard() {
+    if (locked) {
+      xSemaphoreGive(mutex);
+    }
+  }
+  bool ok() const { return locked; }
+};
 
 static bool validateHeader(File& file) {
   uint8_t header[4] = {0};
@@ -44,6 +63,11 @@ void OtaManager::handle() { ArduinoOTA.handle(); }
 
 bool OtaManager::installFromSd(const char* path, OtaStageCallback afterWriteCb,
                                void* context) {
+  SdLockGuard lock;
+  if (!lock.ok()) {
+    logLine("[ota] sd mutex unavailable");
+    return false;
+  }
   logLine("[ota] install start");
   logLine("[ota] ota partition required");
 

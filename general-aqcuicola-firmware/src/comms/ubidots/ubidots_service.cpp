@@ -384,6 +384,25 @@ void UbidotsService::handlePublishFailure(const char* label) {
 }
 
 void UbidotsService::handleMqttConnectFailure() {
+  if (modem_.mqtt().needsEspRestart()) {
+    logger_.error("ubidots: mqtt escalation, restarting ESP");
+    modem_.mqtt().clearEscalation();
+    ESP.restart();
+    return;
+  }
+
+  if (modem_.mqtt().needsModemRestart()) {
+    logger_.warn("ubidots: mqtt code 19 escalation, restarting modem");
+    modem_.mqtt().clearEscalation();
+    modemRestartPending_ = true;
+    modemRestartStartMs_ = millis();
+    modemReady_ = false;
+    dataReady_ = false;
+    consoleSubscribed_ = false;
+    modem_.restart();
+    return;
+  }
+
   ModemError err = modem_.lastError();
   if (err.errorCode != ModemErrorCode::MqttAcquireFailed) {
     return;
@@ -415,6 +434,9 @@ void UbidotsService::resetAccqBackoff() {
   accqFailCount_ = 0;
   accqFailStartMs_ = 0;
   connectBackoffMs_ = kUbiReconnectIntervalMs;
+  modemRestartPending_ = false;
+  modemRestartStartMs_ = 0;
+  modem_.mqtt().clearEscalation();
 }
 
 void UbidotsService::modemTaskEntry(void* param) {
@@ -461,6 +483,17 @@ void UbidotsService::modemTaskLoop() {
   }
 
   for (;;) {
+    if (modemRestartPending_) {
+      uint32_t elapsed = millis() - modemRestartStartMs_;
+      if (elapsed >= 120000UL) {
+        logger_.error("ubidots: modem restart timeout, restarting ESP");
+        modemRestartPending_ = false;
+        ESP.restart();
+      }
+      vTaskDelay(pdMS_TO_TICKS(1000));
+      continue;
+    }
+
     if (otaMode_) {
       if (modem_.mqtt().isConnected()) {
         mqttBusy_ = true;

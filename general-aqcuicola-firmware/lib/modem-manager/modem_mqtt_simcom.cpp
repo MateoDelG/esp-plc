@@ -246,12 +246,12 @@ bool SimcomMqttClient::connect(const char* host, uint16_t port,
                        "acquire failed", modem_.state());
   }
 
-  return connectBroker(host, port, user, pass, useTls);
+  return connectBroker(host, port, clientId, user, pass, useTls);
 }
 
 bool SimcomMqttClient::connectBroker(const char* host, uint16_t port,
-                                     const char* user, const char* pass,
-                                     bool useTls) {
+                                    const char* clientId, const char* user,
+                                    const char* pass, bool useTls) {
   if (!host || strlen(host) == 0) {
     return modem_.fail("mqtt", ModemErrorCode::InvalidArgument,
                        "mqtt host empty", modem_.state());
@@ -303,9 +303,86 @@ bool SimcomMqttClient::connectBroker(const char* host, uint16_t port,
         modem_.transitionTo(ModemState::MqttConnected, "mqtt connected");
         return true;
       }
+      if (code == 19) {
+        return false;
+      }
     }
     return false;
   });
+
+  bool code19Detected = !ok;
+  if (code19Detected) {
+    modem_.logWarn("mqtt", "connect code 19, attempting stack recovery");
+    if (performConnectStackRecovery(clientId)) {
+      modem_.logWarn("mqtt", "stack recovery ok, reattempting connect");
+      connected_ = false;
+      ok = retry(modem_, policy, "mqtt", [&]() {
+        if (user && pass && strlen(user) > 0) {
+          modem_.at().exec(15000L, GF("+CMQTTCONNECT=0,\"tcp://"), host,
+                           GF(":"), port, GF("\",60,1,\""), user, GF("\",\""),
+                           pass, GF("\""));
+        } else {
+          modem_.at().exec(15000L, GF("+CMQTTCONNECT=0,\"tcp://"), host,
+                           GF(":"), port, GF("\",60,1"));
+        }
+        String urcLine;
+        if (modem_.at().waitUrc(UrcType::MqttConnect, 15000UL, urcLine)) {
+          int code = -1;
+          if (ModemParsers::parseMqttResultCode(urcLine, "+CMQTTCONNECT:",
+                                                code) &&
+              code == 0) {
+            connected_ = true;
+            modem_.transitionTo(ModemState::MqttConnected, "mqtt connected");
+            return true;
+          }
+        }
+        return false;
+      });
+      if (ok) {
+        return true;
+      }
+    }
+    modem_.logWarn("mqtt", "stack recovery failed, attempting direct reconnect");
+    resetService();
+    if (ensureStarted()) {
+      AtResult accqRes;
+      if (execAccq(clientId, accqRes)) {
+        acquired_ = true;
+        modem_.logWarn("mqtt", "direct reconnect: accq ok, retrying connect");
+        RetryPolicy oneShot;
+        oneShot.attempts = 1;
+        oneShot.delayMs = 0;
+        oneShot.label = "mqtt connect direct";
+        ok = retry(modem_, oneShot, "mqtt", [&]() {
+          if (user && pass && strlen(user) > 0) {
+            modem_.at().exec(15000L, GF("+CMQTTCONNECT=0,\"tcp://"), host,
+                             GF(":"), port, GF("\",60,1,\""), user, GF("\",\""),
+                             pass, GF("\""));
+          } else {
+            modem_.at().exec(15000L, GF("+CMQTTCONNECT=0,\"tcp://"), host,
+                             GF(":"), port, GF("\",60,1"));
+          }
+          String urcLine;
+          if (modem_.at().waitUrc(UrcType::MqttConnect, 15000UL, urcLine)) {
+            int code = -1;
+            if (ModemParsers::parseMqttResultCode(urcLine, "+CMQTTCONNECT:",
+                                                  code) &&
+                code == 0) {
+              connected_ = true;
+              modem_.transitionTo(ModemState::MqttConnected, "mqtt connected");
+              return true;
+            }
+          }
+          return false;
+        });
+        if (ok) {
+          return true;
+        }
+      }
+    }
+    modem_.logWarn("mqtt", "direct reconnect failed, escalating");
+    markNeedsModemRestart();
+  }
 
   if (!ok) {
     connected_ = false;
@@ -345,7 +422,7 @@ bool SimcomMqttClient::ensureConnected(const char* host, uint16_t port,
   policy.label = "broker connect";
 
   return retry(modem_, policy, "mqtt", [&]() {
-    if (connectBroker(host, port, user, pass, useTls)) {
+    if (connectBroker(host, port, clientId, user, pass, useTls)) {
       return true;
     }
     if (connected_) {
@@ -542,6 +619,71 @@ bool SimcomMqttClient::performAccqRecovery(const char* clientId, bool full) {
   }
   modem_.logWarn("mqtt", "accq recovery failed: " + accqRes.raw);
   return false;
+}
+
+bool SimcomMqttClient::performConnectStackRecovery(const char* clientId) {
+  modem_.logWarn("mqtt", "connect stack recovery: disconnecting");
+  modem_.at().exec(3000L, GF("+CMQTTDISC=0,120"));
+  modem_.logWarn("mqtt", "connect stack recovery: releasing");
+  modem_.at().exec(3000L, GF("+CMQTTREL=0"));
+  modem_.logWarn("mqtt", "connect stack recovery: stopping");
+  modem_.at().exec(3000L, GF("+CMQTTSTOP"));
+
+  started_ = false;
+  acquired_ = false;
+  connected_ = false;
+  tlsConfigured_ = false;
+
+  modem_.logWarn("mqtt", "connect stack recovery: starting");
+  modem_.at().exec(10000L, GF("+CMQTTSTART"));
+  String urcLine;
+  if (modem_.at().waitUrc(UrcType::MqttStart, 10000UL, urcLine)) {
+    int code = -1;
+    int colon = urcLine.indexOf(':');
+    if (colon >= 0) {
+      String codeStr = urcLine.substring(colon + 1);
+      codeStr.trim();
+      code = codeStr.toInt();
+    }
+    if (code != 0 && code != 1 && code != 23) {
+      modem_.logWarn("mqtt", "connect stack recovery: start failed");
+      return false;
+    }
+    started_ = true;
+  } else {
+    modem_.logWarn("mqtt", "connect stack recovery: start urc timeout");
+    return false;
+  }
+
+  AtResult accqRes;
+  if (execAccq(clientId, accqRes)) {
+    acquired_ = true;
+    modem_.logWarn("mqtt", "connect stack recovery: success");
+    return true;
+  }
+  modem_.logWarn("mqtt", "connect stack recovery: accq failed");
+  return false;
+}
+
+void SimcomMqttClient::markNeedsModemRestart() {
+  needsModemRestart_ = true;
+}
+
+void SimcomMqttClient::markNeedsEspRestart() {
+  needsEspRestart_ = true;
+}
+
+bool SimcomMqttClient::needsModemRestart() const {
+  return needsModemRestart_;
+}
+
+bool SimcomMqttClient::needsEspRestart() const {
+  return needsEspRestart_;
+}
+
+void SimcomMqttClient::clearEscalation() {
+  needsModemRestart_ = false;
+  needsEspRestart_ = false;
 }
 
 bool SimcomMqttClient::subscribe(const char* topic, int qos) {

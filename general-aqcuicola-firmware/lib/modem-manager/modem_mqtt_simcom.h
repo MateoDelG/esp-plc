@@ -29,9 +29,11 @@ class SimcomMqttClient : public IModemMqtt {
 
   bool isConnected() const override { return connected_; }
 
+  friend class ModemMqtt;
+
  private:
-  bool connectBroker(const char* host, uint16_t port, const char* user,
-                     const char* pass, bool useTls);
+  bool connectBroker(const char* host, uint16_t port, const char* clientId,
+                     const char* user, const char* pass, bool useTls);
   void resetService();
   void markPublishFailure(const char* step);
   bool execAccq(const char* clientId, AtResult& out);
@@ -39,6 +41,12 @@ class SimcomMqttClient : public IModemMqtt {
   bool queryAccqOccupied(uint8_t index, bool& occupied);
   void recordAccqFailure();
   void resetAccqFailures();
+  bool performConnectStackRecovery(const char* clientId);
+  void markNeedsModemRestart();
+  void markNeedsEspRestart();
+  bool needsModemRestart() const;
+  bool needsEspRestart() const;
+  void clearEscalation();
 
   enum class RxState : uint8_t {
     Idle = 0,
@@ -64,6 +72,8 @@ class SimcomMqttClient : public IModemMqtt {
   String rxTopic_;
   String rxPayload_;
   uint32_t rxStageStartMs_ = 0;
+  bool needsModemRestart_ = false;
+  bool needsEspRestart_ = false;
 };
 
 #endif
