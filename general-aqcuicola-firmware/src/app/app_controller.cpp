@@ -129,6 +129,21 @@ void AppController::begin() {
 }
 
 void AppController::update() {
+  if (ubidotsService_.hasSmsUpdatePending()) {
+    ubidotsService_.publishConsoleValue(kUpdateCode);
+    logger_.warn("app: update command received, starting OTA");
+    otaModemService_.start();
+    ubidotsService_.clearSmsUpdatePending();
+  }
+
+  if (ubidotsService_.hasSmsResetPending()) {
+    ubidotsService_.publishConsoleValue(kResetCode);
+    logger_.warn("app: reset command received, restarting");
+    delay(2000);
+    ubidotsService_.clearSmsResetPending();
+    ESP.restart();
+  }
+
   watchdog_.feed();
   ubidotsService_.update();
   wifiManager_.update(dashboardConfig_.wifiAutoReconnect);

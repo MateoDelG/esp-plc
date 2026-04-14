@@ -11,7 +11,7 @@
 #endif
 
 UbidotsService::UbidotsService(Logger& logger)
-  : logger_(logger), modem_(makeModemConfig(logger_)) {
+  : logger_(logger), modem_(makeModemConfig(logger_)), smsHandler_(modem_) {
   connectBackoffMs_ = kUbiReconnectIntervalMs;
 }
 
@@ -324,6 +324,22 @@ bool UbidotsService::lastPublishOk() const {
   return lastPublishOk_;
 }
 
+bool UbidotsService::hasSmsResetPending() const {
+  return smsResetPending_;
+}
+
+void UbidotsService::clearSmsResetPending() {
+  smsResetPending_ = false;
+}
+
+bool UbidotsService::hasSmsUpdatePending() const {
+  return smsUpdatePending_;
+}
+
+void UbidotsService::clearSmsUpdatePending() {
+  smsUpdatePending_ = false;
+}
+
 bool UbidotsService::hasPendingConsoleMessage() const {
   return consoleCount_ > 0;
 }
@@ -474,6 +490,8 @@ void UbidotsService::modemTaskLoop() {
 
   modemReady_ = true;
   logger_.info("modem: initialized");
+
+  smsHandler_.begin();
 
   if (modem_.ensureDataSession()) {
     dataReady_ = true;
@@ -739,7 +757,23 @@ void UbidotsService::rxTaskLoop() {
             type != UrcType::MqttRxTopic &&
             type != UrcType::MqttRxPayload &&
             type != UrcType::MqttRxEnd) {
-          modem_.urc().push(line);
+          if (type == UrcType::SmsIncoming) {
+            String smsBody;
+            if (modem_.at().readLineNonBlocking(smsBody)) {
+              smsBody.replace("\r", "");
+              smsBody.replace("\n", "");
+              smsBody.trim();
+              if (SmsHandler::isResetCommand(smsBody)) {
+                smsResetPending_ = true;
+                logger_.warn("ubidots: reset command received via SMS");
+              } else if (SmsHandler::isUpdateCommand(smsBody)) {
+                smsUpdatePending_ = true;
+                logger_.warn("ubidots: update command received via SMS");
+              }
+            }
+          } else {
+            modem_.urc().push(line);
+          }
           continue;
         }
 

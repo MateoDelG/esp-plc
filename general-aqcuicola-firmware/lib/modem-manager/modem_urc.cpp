@@ -45,6 +45,9 @@ UrcType UrcStore::classify(const String& line) {
   if (line.startsWith("+CNTP:")) {
     return UrcType::Cntp;
   }
+  if (line.startsWith("+CMT:")) {
+    return UrcType::SmsIncoming;
+  }
   return UrcType::None;
 }
 

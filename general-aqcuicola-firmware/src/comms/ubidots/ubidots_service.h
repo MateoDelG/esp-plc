@@ -6,6 +6,7 @@
 #include "models/console_message.h"
 #include "models/telemetry_packet.h"
 #include "modem_manager.h"
+#include "modem_sms.h"
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
@@ -36,6 +37,10 @@ class UbidotsService {
   bool isModemReady() const;
   bool isDataReady() const;
   bool lastPublishOk() const;
+  bool hasSmsResetPending() const;
+  void clearSmsResetPending();
+  bool hasSmsUpdatePending() const;
+  void clearSmsUpdatePending();
 
  private:
   bool ensureConnected();
@@ -80,6 +85,9 @@ class UbidotsService {
   bool modemRestartPending_ = false;
   bool espRestartPending_ = false;
   uint32_t modemRestartStartMs_ = 0;
+  volatile bool smsResetPending_ = false;
+  volatile bool smsUpdatePending_ = false;
+  SmsHandler smsHandler_;
 
   static void modemTaskEntry(void* param);
   void modemTaskLoop();

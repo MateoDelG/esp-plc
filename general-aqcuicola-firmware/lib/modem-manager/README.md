@@ -32,8 +32,24 @@ generico, manteniendo logs detallados del trafico AT.
   - CMQTTSTART/ACCQ/CONNECT/PUB/SUB/DISCONNECT.
 - `modem_tap_stream`
   - Tap de trafico AT para logs.
+- `modem_sms`
+  - Handler de SMS entrantes. Soporta deteccion de comando "RESET" via SMS para reiniciar el ESP.
 - `modem_types`
   - Tipos y configuracion base.
+
+## Comando RESET via SMS
+
+El modem puede recibir comandos via SMS. Cuando llega un SMS con texto "RESET" (case-insensitive), se reinicia el ESP.
+
+Configuracion automatica en `SmsHandler::begin()`:
+- `AT+CMGF=1` (modo texto)
+- `AT+CNMI=1,2,0,0,0` (URC directo al stream)
+
+El flujo en el firmware:
+1. `smsHandler_.begin()` se llama tras inicializar el modem
+2. En el burst loop del `rxTaskLoop`, se detecta `+CMT:` y se parsea el body
+3. Si el body es "RESET", se marca `smsResetPending_ = true`
+4. En `app.update()`, se detecta el flag y se llama `ESP.restart()`
 
 ## Flujo de inicializacion
 
