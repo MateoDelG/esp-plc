@@ -70,8 +70,14 @@ bool TimeService::fetchTime() {
   logger_.info("time: sync start");
   time_t epoch = 0;
   String clock;
-  if (!ubidots_.modem().syncTimeWithNtp(kNtpServer, kBogotaTzQuarterHours,
-                                       kNtpTimeoutMs, epoch, &clock)) {
+  if (!ubidots_.lockModem("ntp")) {
+    logger_.warn("time: modem lock failed");
+    return false;
+  }
+  bool ok = ubidots_.modem().syncTimeWithNtp(kNtpServer, kBogotaTzQuarterHours,
+                                            kNtpTimeoutMs, epoch, &clock);
+  ubidots_.unlockModem();
+  if (!ok) {
     logger_.warn("time: ntp sync failed");
     return false;
   }

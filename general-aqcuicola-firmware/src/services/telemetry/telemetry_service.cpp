@@ -18,6 +18,19 @@ void TelemetryService::update() {
   }
 
   uint32_t now = millis();
+  if (publishNowPending_ && ubidots_.isConnected()) {
+    publishNowPending_ = false;
+    lastPublishOk_ = ubidots_.publishTelemetry(data_);
+    if (lastPublishOk_) {
+      lastPublishMs_ = now;
+      logger_.info("telemetry: pending publish sent");
+    } else {
+      publishNowPending_ = true;
+      logger_.warn("telemetry: pending publish failed");
+    }
+    return;
+  }
+
   if (now - lastPublishMs_ < publishIntervalMs_) {
     return;
   }
@@ -32,6 +45,32 @@ void TelemetryService::update() {
   } else {
     logger_.warn("telemetry: publish failed");
   }
+}
+
+bool TelemetryService::publishNow() {
+  if (ubidots_.isOtaMode()) {
+    lastPublishOk_ = false;
+    logger_.warn("telemetry: publish-now skipped, ota mode");
+    return false;
+  }
+
+  if (!ubidots_.isConnected()) {
+    lastPublishOk_ = false;
+    publishNowPending_ = true;
+    logger_.warn("telemetry: publish-now skipped, ubidots disconnected");
+    return false;
+  }
+
+  lastPublishOk_ = ubidots_.publishTelemetry(data_);
+  if (lastPublishOk_) {
+    publishNowPending_ = false;
+    lastPublishMs_ = millis();
+    logger_.info("telemetry: published by console");
+  } else {
+    publishNowPending_ = true;
+    logger_.warn("telemetry: publish-now failed");
+  }
+  return lastPublishOk_;
 }
 
 void TelemetryService::setBlowersState(bool state) {

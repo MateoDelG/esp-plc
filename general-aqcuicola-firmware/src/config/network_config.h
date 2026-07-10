@@ -2,8 +2,8 @@
 
 #include <Arduino.h>
 
-constexpr const char* kWifiSsid = "Delga";
-constexpr const char* kWifiPassword = "Delga1213";
+constexpr const char* kWifiSsid = "";
+constexpr const char* kWifiPassword = "";
 
 const IPAddress kLocalIp(192, 168, 1, 180);
 const IPAddress kGatewayIp(192, 168, 1, 1);

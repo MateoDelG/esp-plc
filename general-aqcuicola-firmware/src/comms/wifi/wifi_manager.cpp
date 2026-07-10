@@ -3,6 +3,12 @@
 #include "config/app_config.h"
 #include "config/network_config.h"
 
+namespace {
+const IPAddress kApIp(192, 168, 4, 1);
+const IPAddress kApGateway(192, 168, 4, 1);
+const IPAddress kApSubnet(255, 255, 255, 0);
+}
+
 WifiManager::WifiManager(Logger& logger) : logger_(logger) {}
 
 bool WifiManager::begin() {
@@ -64,7 +70,9 @@ bool WifiManager::connectOrStartAp(const String& ssid, const String& pass) {
 }
 
 void WifiManager::update(bool autoReconnect) {
+  static bool apOnlyLogged = false;
   if (isConnected()) {
+    apOnlyLogged = false;
     if (isApActive()) {
       stopAp();
     }
@@ -78,6 +86,16 @@ void WifiManager::update(bool autoReconnect) {
   if (lastAttempt != 0 && now - lastAttempt < 30000U) {
     return;
   }
+
+  if (isApActive() && ssid_.length() == 0) {
+    if (!apOnlyLogged) {
+      logger_.info("wifi: ap-only mode, skip reconnect");
+      apOnlyLogged = true;
+    }
+    return;
+  }
+
+  apOnlyLogged = false;
   lastAttempt = now;
   if (connect()) {
     if (isApActive()) {
@@ -94,7 +112,10 @@ bool WifiManager::startAp(const char* ssid, const char* pass) {
   WiFi.disconnect(true);
   delay(100);
   WiFi.mode(WIFI_AP);
-  WiFi.softAPConfig(kLocalIp, kLocalIp, kSubnetMask);
+  bool configOk = WiFi.softAPConfig(kApIp, kApGateway, kApSubnet);
+  if (!configOk) {
+    logger_.warn("wifi: ap ip config failed");
+  }
   bool ok = WiFi.softAP(ssid, pass);
   if (ok) {
     logger_.logf("wifi", "ap started: %s", WiFi.softAPIP().toString().c_str());

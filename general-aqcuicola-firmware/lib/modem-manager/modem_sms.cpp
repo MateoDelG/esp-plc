@@ -48,3 +48,13 @@ bool SmsHandler::isUpdateCommand(const String& text) {
   lower.toLowerCase();
   return lower == "update";
 }
+
+bool SmsHandler::isPublishCommand(const String& text) {
+  if (text.length() == 0) {
+    return false;
+  }
+
+  String lower = text;
+  lower.toLowerCase();
+  return lower == "publish";
+}

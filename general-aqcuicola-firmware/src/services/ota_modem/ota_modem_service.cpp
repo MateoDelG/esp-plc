@@ -4,6 +4,7 @@
 
 #include "config/ota_modem_codes.h"
 #include "modem_http_storage.h"
+#include "services/watchdog/watchdog_service.h"
 
 OtaModemService* OtaModemService::active_ = nullptr;
 
@@ -15,6 +16,10 @@ void OtaModemService::setModem(ModemManager* modem) {
 
 void OtaModemService::setUbidots(UbidotsService* ubidots) {
   ubidots_ = ubidots;
+}
+
+void OtaModemService::setWatchdogService(WatchdogService* watchdog) {
+  watchdog_ = watchdog;
 }
 
 bool OtaModemService::isBusy() const {
@@ -46,6 +51,12 @@ void OtaModemService::taskEntry(void* param) {
 
 void OtaModemService::taskLoop() {
   logger_.info("ota-modem: download start");
+  if (watchdog_) {
+    watchdog_->registerCurrentTask();
+    watchdog_->setMqttActivityActive(false);
+    watchdog_->setOtaModemActive(true);
+    watchdog_->feedCurrentTask();
+  }
 
   bool failReported = false;
   auto reportFail = [&]() {
@@ -69,6 +80,27 @@ void OtaModemService::taskLoop() {
       ubidots_->setRxPaused(false);
     }
   };
+  bool modemLocked = false;
+  auto releaseModem = [&]() {
+    if (modemLocked && ubidots_) {
+      ubidots_->unlockModem();
+      modemLocked = false;
+    }
+  };
+  auto finishFailure = [&]() {
+    releaseModem();
+    reportFail();
+    resumeRx();
+    if (ubidots_) {
+      ubidots_->setOtaActive(false);
+    }
+    if (watchdog_) {
+      watchdog_->setOtaModemActive(false);
+      watchdog_->unregisterCurrentTask();
+    }
+    busy_ = false;
+    task_ = nullptr;
+  };
 
   if (ubidots_) {
     ubidots_->setOtaActive(true);
@@ -76,16 +108,27 @@ void OtaModemService::taskLoop() {
 
   pauseRx();
 
+  if (ubidots_) {
+    if (!ubidots_->lockModem("ota-modem")) {
+      logger_.error("ota-modem: modem lock failed");
+      finishFailure();
+      return;
+    }
+    modemLocked = true;
+  }
+  if (watchdog_) {
+    watchdog_->markOtaModem();
+    watchdog_->feedCurrentTask();
+  }
+
   if (!modem_->ensureDataSession()) {
     logger_.error("ota-modem: data session failed");
-    reportFail();
-    resumeRx();
-    if (ubidots_) {
-      ubidots_->setOtaActive(false);
-    }
-    busy_ = false;
-    task_ = nullptr;
+    finishFailure();
     return;
+  }
+  if (watchdog_) {
+    watchdog_->markOtaModem();
+    watchdog_->feedCurrentTask();
   }
 
   bool ok = modem_->http().downloadToModemFile(
@@ -93,38 +136,39 @@ void OtaModemService::taskLoop() {
     kHttpModemPath,
     logSink
   );
+  if (watchdog_) {
+    watchdog_->markOtaModem();
+    watchdog_->feedCurrentTask();
+  }
 
   if (!ok) {
     logger_.error("ota-modem: download failed");
-    reportFail();
-    resumeRx();
-    if (ubidots_) {
-      ubidots_->setOtaActive(false);
-    }
-    busy_ = false;
-    task_ = nullptr;
+    finishFailure();
     return;
   }
 
   logger_.info("ota-modem: download ok");
+  if (watchdog_) {
+    watchdog_->markOtaModem();
+    watchdog_->feedCurrentTask();
+  }
 
   int size = modem_->http().lastHttpLength();
   if (size <= 0) {
     logger_.error("ota-modem: invalid download size");
-    reportFail();
-    resumeRx();
-    if (ubidots_) {
-      ubidots_->setOtaActive(false);
-    }
-    busy_ = false;
-    task_ = nullptr;
+    finishFailure();
     return;
   }
 
   logger_.info("ota-modem: install start");
   bool installed = installFromModemFile(kHttpModemPath,
                                         static_cast<size_t>(size));
+  if (watchdog_) {
+    watchdog_->markOtaModem();
+    watchdog_->feedCurrentTask();
+  }
   deleteModemFile(kHttpModemPath);
+  releaseModem();
   if (installed) {
     logger_.info("ota-modem: install ok");
     if (ubidots_) {
@@ -140,6 +184,10 @@ void OtaModemService::taskLoop() {
   resumeRx();
   if (ubidots_) {
     ubidots_->setOtaActive(false);
+  }
+  if (watchdog_) {
+    watchdog_->setOtaModemActive(false);
+    watchdog_->unregisterCurrentTask();
   }
 
   busy_ = false;
@@ -174,6 +222,10 @@ bool OtaModemService::installFromModemFile(const char* modemPath, size_t size) {
   uint8_t buffer[kHttpDownloadChunkSize];
   bool ok = true;
   while (remaining > 0) {
+    if (watchdog_) {
+      watchdog_->markOtaModem();
+      watchdog_->feedCurrentTask();
+    }
     size_t toRead = remaining > kHttpDownloadChunkSize
                         ? kHttpDownloadChunkSize
                         : remaining;

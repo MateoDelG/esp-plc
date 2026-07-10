@@ -12,6 +12,7 @@ class TelemetryService {
 
   void begin();
   void update();
+  bool publishNow();
   void setBlowersState(bool state);
   void setPublishIntervalMs(uint32_t intervalMs);
   void updatePhO2FromUart(bool hasTank1, float ph1, float o2_1,
@@ -27,6 +28,7 @@ class TelemetryService {
   UbidotsService& ubidots_;
   TelemetryPacket data_;
   bool lastPublishOk_ = false;
+  bool publishNowPending_ = false;
   uint32_t lastPublishMs_ = 0;
   uint32_t publishIntervalMs_ = 0;
 };

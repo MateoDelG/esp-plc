@@ -2,6 +2,7 @@
 
 #include <Arduino.h>
 
+
 constexpr const char* kUbiToken = "BBUS-orL2zH4XNEKC0880tXUcuxdTWpX5R8";
 constexpr const char* kUbiHost = "industrial.api.ubidots.com";
 constexpr uint16_t kUbiPort = 8883;

@@ -37,9 +37,11 @@ void AppController::begin() {
   }
 
   setState(AppState::ConnectingWifi);
-  wifiManager_.begin();
-  bool wifiOk = wifiManager_.connectOrStartAp(dashboardConfig_.wifiSsid,
-                                              dashboardConfig_.wifiPass);
+  bool wifiOk = wifiManager_.begin();
+  if (!wifiOk) {
+    wifiOk = wifiManager_.connectOrStartAp(dashboardConfig_.wifiSsid,
+                                           dashboardConfig_.wifiPass);
+  }
   status_.lastWifiAttemptOk = wifiOk;
   status_.wifiConnected = wifiManager_.isConnected();
   status_.localIp = wifiManager_.localIp();
@@ -101,6 +103,7 @@ void AppController::begin() {
 
   setState(AppState::OtaReady);
 
+  ubidotsService_.setWatchdogService(&watchdog_);
   bool ubidotsOk = ubidotsService_.begin();
   if (!ubidotsOk) {
     logger_.warn("ubidots: task start failed");
@@ -115,6 +118,7 @@ void AppController::begin() {
 
   otaModemService_.setModem(&ubidotsService_.modem());
   otaModemService_.setUbidots(&ubidotsService_);
+  otaModemService_.setWatchdogService(&watchdog_);
 
   telemetryService_.begin();
   analogService_.begin();
@@ -129,6 +133,12 @@ void AppController::begin() {
 }
 
 void AppController::update() {
+  if (ubidotsService_.hasSmsPublishPending()) {
+    logger_.warn("app: publish command received via SMS");
+    telemetryService_.publishNow();
+    ubidotsService_.clearSmsPublishPending();
+  }
+
   if (ubidotsService_.hasSmsUpdatePending()) {
     ubidotsService_.publishConsoleValue(kUpdateCode);
     logger_.warn("app: update command received, starting OTA");
@@ -302,6 +312,8 @@ void AppController::update() {
         if (!otaModemService_.start()) {
           logger_.warn("ota-modem: already running");
         }
+      } else if (command == kPublishNowCode) {
+        telemetryService_.publishNow();
       }
     }
   }

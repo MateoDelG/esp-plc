@@ -8,6 +8,8 @@
 #include "modem_manager.h"
 #include "modem_sms.h"
 
+class WatchdogService;
+
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 #include "freertos/task.h"
@@ -31,6 +33,8 @@ class UbidotsService {
   bool popConsoleMessage(ConsoleMessage& out);
   uint8_t pendingConsoleCount() const;
   void setRxPaused(bool paused);
+  bool lockModem(const char* label);
+  void unlockModem();
   bool isConnected() const;
   ModemManager& modem();
   bool isConsoleSubscribed() const;
@@ -41,6 +45,9 @@ class UbidotsService {
   void clearSmsResetPending();
   bool hasSmsUpdatePending() const;
   void clearSmsUpdatePending();
+  bool hasSmsPublishPending() const;
+  void clearSmsPublishPending();
+  void setWatchdogService(WatchdogService* watchdog);
 
  private:
   bool ensureConnected();
@@ -52,6 +59,7 @@ class UbidotsService {
   bool lockMqtt(const char* label);
   void unlockMqtt();
   void checkUrcOverflow();
+  void checkCommunicationHealth();
   static void rxTaskEntry(void* param);
   void rxTaskLoop();
 
@@ -74,6 +82,12 @@ class UbidotsService {
   bool publishDisabledLogged_ = false;
   uint32_t lastPollMs_ = 0;
   uint32_t lastConnectAttemptMs_ = 0;
+  uint32_t lastDataAttemptMs_ = 0;
+  uint32_t lastConnectOkMs_ = 0;
+  uint32_t lastPublishOkMs_ = 0;
+  uint32_t lastRxMs_ = 0;
+  uint32_t lastSmsRxMs_ = 0;
+  uint32_t lastHealthLogMs_ = 0;
   uint32_t connectBackoffMs_ = 0;
   uint8_t accqFailCount_ = 0;
   uint32_t accqFailStartMs_ = 0;
@@ -87,6 +101,8 @@ class UbidotsService {
   uint32_t modemRestartStartMs_ = 0;
   volatile bool smsResetPending_ = false;
   volatile bool smsUpdatePending_ = false;
+  volatile bool smsPublishPending_ = false;
+  WatchdogService* watchdog_ = nullptr;
   SmsHandler smsHandler_;
 
   static void modemTaskEntry(void* param);

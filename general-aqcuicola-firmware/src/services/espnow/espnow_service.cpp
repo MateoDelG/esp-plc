@@ -24,7 +24,13 @@ EspNowService::EspNowService(Logger& logger) : logger_(logger) {}
 
 void EspNowService::begin() {
   active_ = this;
-  WiFi.mode(WIFI_STA);
+  wifi_mode_t mode = WiFi.getMode();
+  if (mode == WIFI_AP || mode == WIFI_AP_STA) {
+    WiFi.mode(WIFI_AP_STA);
+    logger_.info("espnow: keeping AP (AP+STA)");
+  } else {
+    WiFi.mode(WIFI_STA);
+  }
   logger_.logf("req", "STA MAC: %s", WiFi.macAddress().c_str());
   logger_.logf("req", "Channel: %u", WiFi.channel());
   channel_ = static_cast<uint8_t>(WiFi.channel());

@@ -5,10 +5,18 @@
 #include "config/ubidots_config.h"
 #include "config/ota_modem_codes.h"
 #include "modem_parsers.h"
+#include "services/watchdog/watchdog_service.h"
 
 #ifndef UBIDOTS_RX_DEBUG
 #define UBIDOTS_RX_DEBUG 1
 #endif
+
+namespace {
+constexpr uint32_t kDataRetryIntervalMs = 30000UL;
+constexpr uint32_t kHealthLogIntervalMs = 60000UL;
+constexpr uint32_t kMqttStaleConnectedMs = 20UL * 60UL * 1000UL;
+constexpr uint32_t kMqttDisconnectedRestartMs = 15UL * 60UL * 1000UL;
+}
 
 UbidotsService::UbidotsService(Logger& logger)
   : logger_(logger), modem_(makeModemConfig(logger_)), smsHandler_(modem_) {
@@ -41,6 +49,8 @@ bool UbidotsService::begin() {
 }
 
 void UbidotsService::update() {
+  checkCommunicationHealth();
+
   if (otaMode_ || !modemReady_ || !dataReady_ || mqttBusy_ || !isConnected()) {
     return;
   }
@@ -124,6 +134,10 @@ bool UbidotsService::publishTelemetry(const TelemetryPacket& data) {
   unlockMqtt();
   lastPublishOk_ = ok;
   if (ok) {
+    lastPublishOkMs_ = millis();
+    if (watchdog_) {
+      watchdog_->markMqttActivity();
+    }
     logger_.info("ubidots: publish ok");
   } else {
     logger_.warn("ubidots: publish failed");
@@ -158,6 +172,10 @@ bool UbidotsService::publishBlowersState(uint8_t value) {
   bool ok = modem_.mqtt().publishJson(topic.c_str(), payload.c_str(), 1, false);
   unlockMqtt();
   if (ok) {
+    lastPublishOkMs_ = millis();
+    if (watchdog_) {
+      watchdog_->markMqttActivity();
+    }
     logger_.info("ubidots: blowers state published");
   } else {
     logger_.warn("ubidots: blowers publish failed");
@@ -192,6 +210,10 @@ bool UbidotsService::publishConsoleValue(uint16_t value) {
   bool ok = modem_.mqtt().publishJson(topic.c_str(), payload.c_str(), 1, false);
   unlockMqtt();
   if (ok) {
+    lastPublishOkMs_ = millis();
+    if (watchdog_) {
+      watchdog_->markMqttActivity();
+    }
     logger_.info("ubidots: console value published");
   } else {
     logger_.warn("ubidots: console publish failed");
@@ -340,6 +362,18 @@ void UbidotsService::clearSmsUpdatePending() {
   smsUpdatePending_ = false;
 }
 
+bool UbidotsService::hasSmsPublishPending() const {
+  return smsPublishPending_;
+}
+
+void UbidotsService::clearSmsPublishPending() {
+  smsPublishPending_ = false;
+}
+
+void UbidotsService::setWatchdogService(WatchdogService* watchdog) {
+  watchdog_ = watchdog;
+}
+
 bool UbidotsService::hasPendingConsoleMessage() const {
   return consoleCount_ > 0;
 }
@@ -415,7 +449,12 @@ void UbidotsService::handleMqttConnectFailure() {
     modemReady_ = false;
     dataReady_ = false;
     consoleSubscribed_ = false;
-    modem_.restart();
+    if (lockMqtt("connect-fail-modem-restart")) {
+      modem_.restart();
+      unlockMqtt();
+    } else {
+      logger_.warn("ubidots: modem restart skipped, locked");
+    }
     return;
   }
 
@@ -472,8 +511,17 @@ void UbidotsService::rxTaskEntry(void* param) {
 }
 
 void UbidotsService::modemTaskLoop() {
+  if (watchdog_) {
+    watchdog_->registerCurrentTask();
+    watchdog_->markModemTask();
+  }
+
   bool modemReady = false;
   for (uint8_t attempt = 1; attempt <= 3; ++attempt) {
+    if (watchdog_) {
+      watchdog_->markModemTask();
+      watchdog_->feedCurrentTask();
+    }
     logger_.logf("modem", "starting modem (attempt %u/3)", attempt);
     if (modem_.begin()) {
       modemReady = true;
@@ -485,6 +533,9 @@ void UbidotsService::modemTaskLoop() {
 
   if (!modemReady) {
     logger_.error("modem: init failed after retries");
+    if (watchdog_) {
+      watchdog_->unregisterCurrentTask();
+    }
     return;
   }
 
@@ -492,8 +543,26 @@ void UbidotsService::modemTaskLoop() {
   logger_.info("modem: initialized");
 
   smsHandler_.begin();
+  if (!rxTask_) {
+    rxTaskActive_ = true;
+    xTaskCreatePinnedToCore(
+      rxTaskEntry,
+      "mqttRxTask",
+      4096,
+      this,
+      1,
+      &rxTask_,
+      1
+    );
+    logger_.info("ubidots: rx task started");
+  }
 
-  if (modem_.ensureDataSession()) {
+  bool initialDataReady = false;
+  if (lockMqtt("data-init")) {
+    initialDataReady = modem_.ensureDataSession();
+    unlockMqtt();
+  }
+  if (initialDataReady) {
     dataReady_ = true;
     logger_.info("modem: data session ready");
   } else {
@@ -501,8 +570,33 @@ void UbidotsService::modemTaskLoop() {
   }
 
   for (;;) {
+    if (watchdog_) {
+      watchdog_->markModemTask();
+      watchdog_->feedCurrentTask();
+    }
+
     if (modemRestartPending_) {
-      uint32_t elapsed = millis() - modemRestartStartMs_;
+      uint32_t now = millis();
+      uint32_t elapsed = now - modemRestartStartMs_;
+      if (elapsed >= 10000UL &&
+          (lastDataAttemptMs_ == 0 || now - lastDataAttemptMs_ >= kDataRetryIntervalMs)) {
+        lastDataAttemptMs_ = now;
+        logger_.info("ubidots: modem restart recovery attempt");
+        if (lockMqtt("modem-recovery")) {
+          if (modem_.begin() && modem_.ensureDataSession()) {
+            modemReady_ = true;
+            dataReady_ = true;
+            modemRestartPending_ = false;
+            modemRestartStartMs_ = 0;
+            consoleSubscribed_ = false;
+            resetAccqBackoff();
+            logger_.info("ubidots: modem recovered");
+          } else {
+            logger_.warn("ubidots: modem recovery failed");
+          }
+          unlockMqtt();
+        }
+      }
       if (elapsed >= 120000UL) {
         logger_.error("ubidots: modem restart timeout, restarting ESP");
         modemRestartPending_ = false;
@@ -530,6 +624,20 @@ void UbidotsService::modemTaskLoop() {
     }
 
     if (!dataReady_) {
+      uint32_t now = millis();
+      if (lastDataAttemptMs_ == 0 || now - lastDataAttemptMs_ >= kDataRetryIntervalMs) {
+        lastDataAttemptMs_ = now;
+        logger_.info("modem: retry data session");
+        if (lockMqtt("data-retry")) {
+          if (modem_.ensureDataSession()) {
+            dataReady_ = true;
+            logger_.info("modem: data session ready");
+          } else {
+            logger_.warn("modem: data session retry failed");
+          }
+          unlockMqtt();
+        }
+      }
       vTaskDelay(pdMS_TO_TICKS(2000));
       continue;
     }
@@ -574,6 +682,10 @@ void UbidotsService::modemTaskLoop() {
 
       if (connected) {
         logger_.info("ubidots: mqtt connected");
+        lastConnectOkMs_ = millis();
+        if (watchdog_) {
+          watchdog_->markMqttActivity();
+        }
         resetAccqBackoff();
         String topic = ubidotsConsoleTopic();
         if (lockMqtt("subscribe")) {
@@ -585,18 +697,8 @@ void UbidotsService::modemTaskLoop() {
         }
         if (consoleSubscribed_) {
           logger_.info("ubidots: console subscribed");
-          if (!rxTask_) {
-            rxTaskActive_ = true;
-            xTaskCreatePinnedToCore(
-              rxTaskEntry,
-              "mqttRxTask",
-              4096,
-              this,
-              1,
-              &rxTask_,
-              1
-            );
-            logger_.info("ubidots: rx task started");
+          if (watchdog_) {
+            watchdog_->markMqttActivity();
           }
         } else {
           logger_.warn("ubidots: console subscribe failed");
@@ -639,6 +741,69 @@ void UbidotsService::checkUrcOverflow() {
   }
 }
 
+void UbidotsService::checkCommunicationHealth() {
+  if (!modemReady_ || otaMode_ || otaActive_) {
+    return;
+  }
+  if (modemRestartPending_) {
+    return;
+  }
+
+  uint32_t now = millis();
+  if (lastHealthLogMs_ == 0 || now - lastHealthLogMs_ >= kHealthLogIntervalMs) {
+    logger_.logf("ubidots",
+                 "health data=%u mqtt=%u sub=%u busy=%u rxPaused=%u heap=%u minHeap=%u",
+                 dataReady_ ? 1 : 0,
+                 isConnected() ? 1 : 0,
+                 consoleSubscribed_ ? 1 : 0,
+                 mqttBusy_ ? 1 : 0,
+                 rxPaused_ ? 1 : 0,
+                 static_cast<unsigned>(ESP.getFreeHeap()),
+                 static_cast<unsigned>(ESP.getMinFreeHeap()));
+    lastHealthLogMs_ = now;
+  }
+
+  if (!dataReady_) {
+    return;
+  }
+
+  if (isConnected()) {
+    uint32_t lastActivity = lastPublishOkMs_;
+    if (lastRxMs_ > lastActivity) {
+      lastActivity = lastRxMs_;
+    }
+    if (lastSmsRxMs_ > lastActivity) {
+      lastActivity = lastSmsRxMs_;
+    }
+    if (lastActivity != 0 && now - lastActivity >= kMqttStaleConnectedMs) {
+      logger_.warn("ubidots: mqtt stale, forcing reconnect");
+      mqttBusy_ = true;
+      if (lockMqtt("health-disconnect")) {
+        modem_.mqtt().disconnect();
+        unlockMqtt();
+      }
+      consoleSubscribed_ = false;
+      mqttBusy_ = false;
+      lastPublishOkMs_ = now;
+      lastRxMs_ = now;
+    }
+    return;
+  }
+
+  if (lastConnectOkMs_ != 0 && now - lastConnectOkMs_ >= kMqttDisconnectedRestartMs) {
+    logger_.error("ubidots: mqtt disconnected too long, restarting modem");
+    modemRestartPending_ = true;
+    modemRestartStartMs_ = now;
+    modemReady_ = false;
+    dataReady_ = false;
+    consoleSubscribed_ = false;
+    if (lockMqtt("health-modem-restart")) {
+      modem_.restart();
+      unlockMqtt();
+    }
+  }
+}
+
 bool UbidotsService::lockMqtt(const char* label) {
   if (!mqttMutex_) {
     return true;
@@ -660,6 +825,14 @@ void UbidotsService::unlockMqtt() {
   }
 }
 
+bool UbidotsService::lockModem(const char* label) {
+  return lockMqtt(label);
+}
+
+void UbidotsService::unlockModem() {
+  unlockMqtt();
+}
+
 bool UbidotsService::isOtaMode() const {
   return otaMode_;
 }
@@ -673,6 +846,11 @@ bool UbidotsService::isOtaActive() const {
 }
 
 void UbidotsService::rxTaskLoop() {
+  if (watchdog_) {
+    watchdog_->registerCurrentTask();
+    watchdog_->markRxTask();
+  }
+
   String consoleTopic = ubidotsConsoleTopic();
   const uint8_t kBurstMax = 6;
   const uint32_t kBurstBudgetMs = 20;
@@ -728,14 +906,24 @@ void UbidotsService::rxTaskLoop() {
   };
 
   for (;;) {
+    if (watchdog_) {
+      watchdog_->markRxTask();
+      watchdog_->feedCurrentTask();
+    }
+
     if (rxPaused_) {
       vTaskDelay(pdMS_TO_TICKS(250));
       continue;
     }
-    if (otaMode_ || !modemReady_ || !dataReady_ || !isConnected()) {
+    if (!modemReady_) {
       vTaskDelay(pdMS_TO_TICKS(200));
       continue;
     }
+    if (watchdog_) {
+      watchdog_->markSmsActivity();
+    }
+
+    bool mqttRxReady = !otaMode_ && dataReady_ && isConnected() && consoleSubscribed_;
 
     checkUrcOverflow();
 
@@ -759,21 +947,35 @@ void UbidotsService::rxTaskLoop() {
             type != UrcType::MqttRxEnd) {
           if (type == UrcType::SmsIncoming) {
             String smsBody;
-            if (modem_.at().readLineNonBlocking(smsBody)) {
+            if (modem_.at().readLine(smsBody, 1000)) {
+              if (watchdog_) {
+                watchdog_->markSmsActivity();
+              }
               smsBody.replace("\r", "");
               smsBody.replace("\n", "");
               smsBody.trim();
               if (SmsHandler::isResetCommand(smsBody)) {
                 smsResetPending_ = true;
+                lastSmsRxMs_ = millis();
                 logger_.warn("ubidots: reset command received via SMS");
               } else if (SmsHandler::isUpdateCommand(smsBody)) {
                 smsUpdatePending_ = true;
+                lastSmsRxMs_ = millis();
                 logger_.warn("ubidots: update command received via SMS");
+              } else if (SmsHandler::isPublishCommand(smsBody)) {
+                smsPublishPending_ = true;
+                lastSmsRxMs_ = millis();
+                logger_.warn("ubidots: publish command received via SMS");
               }
             }
           } else {
             modem_.urc().push(line);
           }
+          continue;
+        }
+
+        if (!mqttRxReady) {
+          resetStage();
           continue;
         }
 
@@ -834,6 +1036,10 @@ void UbidotsService::rxTaskLoop() {
 #endif
           if (topic == consoleTopic) {
             pushConsoleMessage(topic, payload);
+            lastRxMs_ = millis();
+            if (watchdog_) {
+              watchdog_->markMqttActivity();
+            }
             logger_.logf("ubidots", "console: %s", payload.c_str());
             ++rxCount;
             if ((rxCount % 20U) == 0U) {

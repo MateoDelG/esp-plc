@@ -17,6 +17,7 @@ class SmsHandler {
 
   static bool isResetCommand(const String& text);
   static bool isUpdateCommand(const String& text);
+  static bool isPublishCommand(const String& text);
 
  private:
   ModemManager& modem_;

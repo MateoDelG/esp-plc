@@ -9,12 +9,15 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 
+class WatchdogService;
+
 class OtaModemService {
  public:
   explicit OtaModemService(Logger& logger);
 
   void setModem(ModemManager* modem);
   void setUbidots(UbidotsService* ubidots);
+  void setWatchdogService(WatchdogService* watchdog);
   bool start();
   bool isBusy() const;
 
@@ -28,6 +31,7 @@ class OtaModemService {
   Logger& logger_;
   ModemManager* modem_ = nullptr;
   UbidotsService* ubidots_ = nullptr;
+  WatchdogService* watchdog_ = nullptr;
   TaskHandle_t task_ = nullptr;
   bool busy_ = false;
 
