@@ -67,7 +67,24 @@ void UARTManager::setBusy(bool v)                  { lock(); busy_ = v;         
 
 void UARTManager::setLastPh(float v)               { lock(); last_ph_ = v;  last_has_data_ = true; unlock(); }
 void UARTManager::setLastO2(float v)               { lock(); last_o2_ = v;  last_has_data_ = true; unlock(); }
+void UARTManager::setLastO2Values(float rawMgL, float offsetMgL,
+                                  float finalMgL) {
+  lock();
+  last_raw_o2_ = rawMgL;
+  last_o2_offset_ = offsetMgL;
+  last_o2_ = finalMgL;
+  last_has_data_ = true;
+  unlock();
+}
 void UARTManager::setLastTempC(float v)            { lock(); last_tempC_ = v; last_has_data_ = true; unlock(); }
+void UARTManager::setLastRawTempC(float v)         { lock(); last_raw_tempC_ = v; unlock(); }
+void UARTManager::setLastTemperatures(float rawC, float correctedC) {
+  lock();
+  last_raw_tempC_ = rawC;
+  last_tempC_ = correctedC;
+  last_has_data_ = true;
+  unlock();
+}
 void UARTManager::setLastResult(const String& r)   { lock(); last_result_ = r; last_has_data_ = true; unlock(); }
 void UARTManager::setLastHasData(bool v)           { lock(); last_has_data_ = v; unlock(); }
 
@@ -89,17 +106,32 @@ void UARTManager::setSampleTempCById(uint8_t id, float v) {
 }
 
 // ====== Getters ======
-bool   UARTManager::getLevelH2O() const            { return levelH2O_ok_; }
-bool   UARTManager::getLevelKCL() const            { return levelKCL_ok_; }
-bool   UARTManager::getAutoRunning() const         { return auto_running_; }
-bool   UARTManager::getAutoMeasureRequested() const{ return autoMeasureRequested_; }
-bool   UARTManager::getBusy() const                { return busy_; }
+bool UARTManager::getLevelH2O() const { lock(); bool v = levelH2O_ok_; unlock(); return v; }
+bool UARTManager::getLevelKCL() const { lock(); bool v = levelKCL_ok_; unlock(); return v; }
+bool UARTManager::getAutoRunning() const { lock(); bool v = auto_running_; unlock(); return v; }
+bool UARTManager::getAutoMeasureRequested() const { lock(); bool v = autoMeasureRequested_; unlock(); return v; }
+bool UARTManager::getBusy() const { lock(); bool v = busy_; unlock(); return v; }
 
-float  UARTManager::getLastPh() const              { return last_ph_; }
-float  UARTManager::getLastO2() const              { return last_o2_; }
-float  UARTManager::getLastTempC() const           { return last_tempC_; }
-String UARTManager::getLastResult() const          { return last_result_; }
-bool   UARTManager::getLastHasData() const         { return last_has_data_; }
+float UARTManager::getLastPh() const { lock(); float v = last_ph_; unlock(); return v; }
+float UARTManager::getLastO2() const { lock(); float v = last_o2_; unlock(); return v; }
+void UARTManager::getLastO2Values(float& rawMgL, float& offsetMgL,
+                                  float& finalMgL) const {
+  lock();
+  rawMgL = last_raw_o2_;
+  offsetMgL = last_o2_offset_;
+  finalMgL = last_o2_;
+  unlock();
+}
+float UARTManager::getLastTempC() const { lock(); float v = last_tempC_; unlock(); return v; }
+float UARTManager::getLastRawTempC() const { lock(); float v = last_raw_tempC_; unlock(); return v; }
+void UARTManager::getLastTemperatures(float& rawC, float& correctedC) const {
+  lock();
+  rawC = last_raw_tempC_;
+  correctedC = last_tempC_;
+  unlock();
+}
+String UARTManager::getLastResult() const { lock(); String v = last_result_; unlock(); return v; }
+bool UARTManager::getLastHasData() const { lock(); bool v = last_has_data_; unlock(); return v; }
 
 // Getters por SAMPLE (por id 1..4)
 float UARTManager::getSamplePhValueById(uint8_t id) const {
@@ -210,7 +242,7 @@ void UARTManager::handle_get_last_() {
   }
 
   bool has;
-  float ph, o2, tc;
+  float ph, o2, o2Raw, o2Offset, tc;
   String res;
   bool h2o;
 
@@ -218,6 +250,8 @@ void UARTManager::handle_get_last_() {
   has = last_has_data_;
   ph  = last_ph_;
   o2  = last_o2_;
+  o2Raw = last_raw_o2_;
+  o2Offset = last_o2_offset_;
   tc  = last_tempC_;
   res = last_result_;
   h2o = levelH2O_ok_;
@@ -238,6 +272,12 @@ void UARTManager::handle_get_last_() {
   } else {
     data["o2"] = nullptr;
   }
+  if (isfinite(o2Raw)) {
+    data["o2_raw"] = o2Raw;
+  } else {
+    data["o2_raw"] = nullptr;
+  }
+  data["o2_offset_mg_l"] = o2Offset;
   data["tempC"] = tc;
 
   JsonObject js = data.createNestedObject("level_sensors");
@@ -292,7 +332,7 @@ void UARTManager::sendError_(const char* err) {
 
 void UARTManager::sendLastSnapshot() {
   bool has;
-  float ph, o2, tc;
+  float ph, o2, o2Raw, o2Offset, tc;
   String res;
   bool h2o;
 
@@ -300,6 +340,8 @@ void UARTManager::sendLastSnapshot() {
   has = last_has_data_;
   ph  = last_ph_;
   o2  = last_o2_;
+  o2Raw = last_raw_o2_;
+  o2Offset = last_o2_offset_;
   tc  = last_tempC_;
   res = last_result_;
   h2o = levelH2O_ok_;
@@ -319,6 +361,12 @@ void UARTManager::sendLastSnapshot() {
   } else {
     data["o2"] = nullptr;
   }
+  if (isfinite(o2Raw)) {
+    data["o2_raw"] = o2Raw;
+  } else {
+    data["o2_raw"] = nullptr;
+  }
+  data["o2_offset_mg_l"] = o2Offset;
   data["tempC"] = tc;
 
   JsonObject js = data.createNestedObject("level_sensors");

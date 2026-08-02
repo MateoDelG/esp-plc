@@ -4,6 +4,18 @@
 // Opcional: si vas a usar applyEEPROMCalibration()
 #include "eeprom_manager.h"
 
+namespace {
+constexpr float O2_CAL_MIN_MV = 1.0f;
+constexpr float O2_CAL_MAX_MV = 4096.0f;
+constexpr float O2_CAL_MIN_TEMP_C = 0.0f;
+constexpr float O2_CAL_MAX_TEMP_C = 40.0f;
+constexpr float O2_REFERENCE_MIN_PPM = 0.10f;
+constexpr float O2_REFERENCE_MAX_PPM = 20.0f;
+constexpr float O2_MIN_PRESSURE_HPA = 500.0f;
+constexpr float O2_MAX_PRESSURE_HPA = 1100.0f;
+constexpr float O2_SEA_LEVEL_PRESSURE_HPA = 1013.25f;
+}
+
 static const uint16_t DO_Table[41] = {
   14460, 14220, 13820, 13440, 13090, 12740, 12420, 12110, 11810, 11530,
   11260, 11010, 10770, 10530, 10300, 10080,  9860,  9660,  9460,  9270,
@@ -49,69 +61,142 @@ bool O2Manager::readAveragedVolts_(float& volts) {
   return true;
 }
 
-uint8_t O2Manager::clampTempIndex_(float tempC) const {
-  int t = (int)(tempC + 0.5f);
-  if (t < 0) t = 0;
-  if (t > 40) t = 40;
-  return (uint8_t)t;
+bool O2Manager::saturationMgL(float tempC, float& saturation_mgL) {
+  return saturationMgL(tempC, O2_SEA_LEVEL_PRESSURE_HPA,
+                       saturation_mgL);
+}
+
+bool O2Manager::saturationMgL(float tempC, float pressureHpa,
+                              float& saturation_mgL) {
+  if (!isfinite(tempC) || tempC < O2_CAL_MIN_TEMP_C ||
+      tempC > O2_CAL_MAX_TEMP_C || !isfinite(pressureHpa) ||
+      pressureHpa < O2_MIN_PRESSURE_HPA ||
+      pressureHpa > O2_MAX_PRESSURE_HPA) {
+    return false;
+  }
+
+  const uint8_t lower = (uint8_t)floorf(tempC);
+  const uint8_t upper = (lower < 40) ? lower + 1 : lower;
+  const float fraction = tempC - (float)lower;
+  const float lower_mgL = (float)DO_Table[lower] / 1000.0f;
+  const float upper_mgL = (float)DO_Table[upper] / 1000.0f;
+  const float seaLevelSaturation =
+      lower_mgL + fraction * (upper_mgL - lower_mgL);
+  const float vaporPressureHpa =
+      6.1121f * expf((18.678f - tempC / 234.5f) *
+                     (tempC / (257.14f + tempC)));
+  const float drySeaLevelPressure =
+      O2_SEA_LEVEL_PRESSURE_HPA - vaporPressureHpa;
+  const float dryLocalPressure = pressureHpa - vaporPressureHpa;
+  if (drySeaLevelPressure <= 0.0f || dryLocalPressure <= 0.0f) {
+    return false;
+  }
+  saturation_mgL = seaLevelSaturation *
+                   (dryLocalPressure / drySeaLevelPressure);
+  return true;
 }
 
 bool O2Manager::readDO(float tempC, float& do_mgL, float* voltsOut) {
+  if (!calibrated_) {
+    setError_("Calibracion O2 requerida");
+    return false;
+  }
   float volts = 0.0f;
   if (!readAveragedVolts_(volts)) return false;
   if (voltsOut) *voltsOut = volts;
 
-  const uint8_t tIndex = clampTempIndex_(tempC);
   const float mv = volts * 1000.0f;
-
-  float v_saturation = NAN;
-  if (mode_ == CalMode::ONE_POINT) {
-    v_saturation = vsat_mV_ + 35.0f * (tempC - tcal_c_);
-  } else if (mode_ == CalMode::TWO_POINT) {
-    if (fabsf(t1_c_ - t2_c_) < 1e-6f) {
-      setError_("Calibracion O2 invalida (T1==T2)");
-      return false;
-    }
-    v_saturation = (tempC - t2_c_) * (v1_mV_ - v2_mV_) / (t1_c_ - t2_c_) + v2_mV_;
-  } else {
-    setError_("Calibracion O2 no configurada");
+  float saturation_mgL = NAN;
+  if (!saturationMgL(tempC, pressure_hpa_, saturation_mgL)) {
+    setError_("Temperatura/presion O2 invalida");
     return false;
   }
+
+  const float v_saturation = vsat_mV_ + 35.0f * (tempC - tcal_c_);
 
   if (v_saturation <= 0.0f) {
     setError_("V_saturation invalido");
     return false;
   }
 
-  const float do_raw = (mv * (float)DO_Table[tIndex]) / v_saturation;
-  do_mgL = do_raw / 1000.0f;
+  do_mgL = (mv * saturation_mgL) / v_saturation;
 
   last_do_mgL_ = do_mgL;
   last_error_[0] = '\0';
   return true;
 }
 
-void O2Manager::setTwoPointCalibration(float V1_mV, float T1_C, float V2_mV, float T2_C) {
-  v1_mV_ = V1_mV;
-  t1_c_  = T1_C;
-  v2_mV_ = V2_mV;
-  t2_c_  = T2_C;
-  mode_ = CalMode::TWO_POINT;
-  last_error_[0] = '\0';
-}
-
-void O2Manager::setSinglePointCalibration(float Vsat_mV, float Tcal_C) {
+bool O2Manager::setSinglePointCalibration(float Vsat_mV, float Tcal_C) {
+  if (!isfinite(Vsat_mV) || Vsat_mV < O2_CAL_MIN_MV ||
+      Vsat_mV > O2_CAL_MAX_MV) {
+    setError_("Voltaje cal O2 invalido");
+    return false;
+  }
+  if (!isfinite(Tcal_C) || Tcal_C < O2_CAL_MIN_TEMP_C ||
+      Tcal_C > O2_CAL_MAX_TEMP_C) {
+    setError_("Temperatura cal O2 invalida");
+    return false;
+  }
   vsat_mV_ = Vsat_mV;
   tcal_c_  = Tcal_C;
-  mode_ = CalMode::ONE_POINT;
+  calibrated_ = true;
+  last_error_[0] = '\0';
+  return true;
+}
+
+bool O2Manager::calculateReferenceCalibration(float measured_mV,
+                                              float reference_ppm,
+                                              float reference_temp_c,
+                                              float& vsat_mV) {
+  if (!isfinite(measured_mV) || measured_mV < O2_CAL_MIN_MV ||
+      measured_mV > O2_CAL_MAX_MV) {
+    setError_("Voltaje patron O2 invalido");
+    return false;
+  }
+  if (!isfinite(reference_ppm) || reference_ppm < O2_REFERENCE_MIN_PPM ||
+      reference_ppm > O2_REFERENCE_MAX_PPM) {
+    setError_("PPM patron O2 invalido");
+    return false;
+  }
+
+  float saturation_mgL = NAN;
+  if (!saturationMgL(reference_temp_c, pressure_hpa_, saturation_mgL)) {
+    setError_("Temperatura/presion patron invalida");
+    return false;
+  }
+
+  const float calculated_vsat = measured_mV * saturation_mgL / reference_ppm;
+  if (!isfinite(calculated_vsat) || calculated_vsat < O2_CAL_MIN_MV ||
+      calculated_vsat > O2_CAL_MAX_MV) {
+    setError_("Vsat patron fuera de rango");
+    return false;
+  }
+
+  vsat_mV = calculated_vsat;
+  last_error_[0] = '\0';
+  return true;
+}
+
+void O2Manager::clearCalibration() {
+  calibrated_ = false;
+  last_do_mgL_ = NAN;
   last_error_[0] = '\0';
 }
 
-void O2Manager::getTwoPointCalibration(float& V1_mV, float& T1_C, float& V2_mV, float& T2_C) const {
-  V1_mV = v1_mV_;
-  T1_C  = t1_c_;
-  V2_mV = v2_mV_;
-  T2_C  = t2_c_;
+bool O2Manager::setAtmosphericPressureHpa(float pressureHpa) {
+  if (!isfinite(pressureHpa) || pressureHpa < O2_MIN_PRESSURE_HPA ||
+      pressureHpa > O2_MAX_PRESSURE_HPA) {
+    setError_("Presion O2 fuera de rango");
+    return false;
+  }
+  pressure_hpa_ = pressureHpa;
+  last_error_[0] = '\0';
+  return true;
+}
+
+void O2Manager::getSinglePointCalibration(float& Vsat_mV, float& Tcal_C) const {
+  Vsat_mV = vsat_mV_;
+  Tcal_C = tcal_c_;
 }
 
 void O2Manager::setAveraging(uint8_t n) {
@@ -130,16 +215,7 @@ bool O2Manager::applyEEPROMCalibration(const ConfigStore& eeprom) {
     return false;
   }
   eeprom.getO2Cal(V1, T1, V2, T2);
-  const bool v1ok = isfinite(V1) && isfinite(T1);
-  const bool v2ok = isfinite(V2) && isfinite(T2);
-  if (v1ok && v2ok) {
-    setTwoPointCalibration(V1, T1, V2, T2);
-    return true;
-  }
-  if (v1ok && !v2ok) {
-    setSinglePointCalibration(V1, T1);
-    return true;
-  }
-  setError_("EEPROM O2 invalido");
-  return false;
+  (void)V2;
+  (void)T2;
+  return setSinglePointCalibration(V1, T1);
 }

@@ -52,7 +52,93 @@ bool ConfigStore::load() {
     return false;
   }
 
-  // Solo aceptamos la versión actual (v9)
+  if (version == 0x000A) {
+    ConfigDataV10 oldCfg{};
+    EEPROM.get(_base, oldCfg);
+    const size_t oldLen = offsetof(ConfigDataV10, crc);
+    const uint32_t oldCrc =
+        crc32(reinterpret_cast<const uint8_t*>(&oldCfg), oldLen);
+    if (oldCrc != oldCfg.crc) {
+      strncpy(_err, "CRC v10 invalido", sizeof(_err)-1);
+      return false;
+    }
+
+    static_assert(offsetof(ConfigData, temperature_offset_c) ==
+                      offsetof(ConfigDataV10, crc),
+                  "El prefijo v10 debe permanecer compatible");
+    memset(&_cfg, 0, sizeof(_cfg));
+    memcpy(&_cfg, &oldCfg, oldLen);
+    _cfg.magic = kMagic;
+    _cfg.version = kVersion;
+    _cfg.temperature_offset_c = 0.0f;
+    _cfg.o2_measurement_offset_mg_l = 0.0f;
+    _cfg.o2_atmospheric_pressure_hpa = 1013.0f;
+
+    if (!save()) {
+      _migrationPending = true;
+      strncpy(_err, "Migracion v10 a v13 no persistida", sizeof(_err)-1);
+      _err[sizeof(_err)-1] = '\0';
+    }
+    return true;
+  }
+
+  if (version == 0x000B) {
+    ConfigDataV11 oldCfg{};
+    EEPROM.get(_base, oldCfg);
+    const size_t oldLen = offsetof(ConfigDataV11, crc);
+    const uint32_t oldCrc =
+        crc32(reinterpret_cast<const uint8_t*>(&oldCfg), oldLen);
+    if (oldCrc != oldCfg.crc) {
+      strncpy(_err, "CRC v11 invalido", sizeof(_err)-1);
+      return false;
+    }
+
+    static_assert(offsetof(ConfigData, o2_measurement_offset_mg_l) ==
+                      offsetof(ConfigDataV11, crc),
+                  "El prefijo v11 debe permanecer compatible");
+    memset(&_cfg, 0, sizeof(_cfg));
+    memcpy(&_cfg, &oldCfg, oldLen);
+    _cfg.magic = kMagic;
+    _cfg.version = kVersion;
+    _cfg.o2_measurement_offset_mg_l = 0.0f;
+    _cfg.o2_atmospheric_pressure_hpa = 1013.0f;
+
+    if (!save()) {
+      _migrationPending = true;
+      strncpy(_err, "Migracion v11 a v13 no persistida", sizeof(_err)-1);
+      _err[sizeof(_err)-1] = '\0';
+    }
+    return true;
+  }
+
+  if (version == 0x000C) {
+    ConfigDataV12 oldCfg{};
+    EEPROM.get(_base, oldCfg);
+    const size_t oldLen = offsetof(ConfigDataV12, crc);
+    const uint32_t oldCrc =
+        crc32(reinterpret_cast<const uint8_t*>(&oldCfg), oldLen);
+    if (oldCrc != oldCfg.crc) {
+      strncpy(_err, "CRC v12 invalido", sizeof(_err)-1);
+      return false;
+    }
+
+    static_assert(offsetof(ConfigData, o2_atmospheric_pressure_hpa) ==
+                      offsetof(ConfigDataV12, crc),
+                  "El prefijo v12 debe permanecer compatible");
+    memset(&_cfg, 0, sizeof(_cfg));
+    memcpy(&_cfg, &oldCfg, oldLen);
+    _cfg.magic = kMagic;
+    _cfg.version = kVersion;
+    _cfg.o2_atmospheric_pressure_hpa = 1013.0f;
+
+    if (!save()) {
+      _migrationPending = true;
+      strncpy(_err, "Migracion v12 a v13 no persistida", sizeof(_err)-1);
+      _err[sizeof(_err)-1] = '\0';
+    }
+    return true;
+  }
+
   if (version != kVersion) {
     strncpy(_err, "VERSION distinta (no soportada)", sizeof(_err)-1);
     return false;
@@ -70,6 +156,7 @@ bool ConfigStore::load() {
   }
 
   _cfg = tmp;
+  _migrationPending = false;
   _err[0] = '\0';
   return true;
 }
@@ -83,6 +170,7 @@ bool ConfigStore::save() {
     strncpy(_err, "EEPROM.commit() fallo", sizeof(_err)-1);
     return false;
   }
+  _migrationPending = false;
   _err[0] = '\0';
   return true;
 }
@@ -135,6 +223,10 @@ void ConfigStore::resetDefaults() {
   _cfg.o2_stabilization_ms = 30000;
   _cfg.ph_stabilization_ms = 30000;
 
+  _cfg.temperature_offset_c = 0.0f;
+  _cfg.o2_measurement_offset_mg_l = 0.0f;
+  _cfg.o2_atmospheric_pressure_hpa = 1013.0f;
+
   computeCrc_();
   _err[0] = '\0';
 }
@@ -183,22 +275,71 @@ bool ConfigStore::hasPH3pt() const {
 
 // ---- O2 2pt ----
 void ConfigStore::setO2Cal(float V1_mV, float T1_C, float V2_mV, float T2_C) {
+  lock_();
   _cfg.o2cal.V1_mV = V1_mV;
   _cfg.o2cal.T1_C  = T1_C;
   _cfg.o2cal.V2_mV = V2_mV;
   _cfg.o2cal.T2_C  = T2_C;
+  unlock_();
 }
 void ConfigStore::getO2Cal(float& V1_mV, float& T1_C, float& V2_mV, float& T2_C) const {
+  lock_();
   V1_mV = _cfg.o2cal.V1_mV;
   T1_C  = _cfg.o2cal.T1_C;
   V2_mV = _cfg.o2cal.V2_mV;
   T2_C  = _cfg.o2cal.T2_C;
+  unlock_();
 }
 bool ConfigStore::hasO2Cal() const {
-  const bool v1ok = !(isnan(_cfg.o2cal.V1_mV) || isnan(_cfg.o2cal.T1_C));
-  const bool v2ok = !(isnan(_cfg.o2cal.V2_mV) || isnan(_cfg.o2cal.T2_C));
-  (void)v2ok;
-  return v1ok;
+  lock_();
+  const bool valid =
+      isfinite(_cfg.o2cal.V1_mV) && _cfg.o2cal.V1_mV >= 1.0f &&
+      _cfg.o2cal.V1_mV <= 4096.0f && isfinite(_cfg.o2cal.T1_C) &&
+      _cfg.o2cal.T1_C >= 0.0f && _cfg.o2cal.T1_C <= 40.0f;
+  unlock_();
+  return valid;
+}
+
+// ---- Temperature offset ----
+void ConfigStore::setTemperatureOffsetC(float offsetC) {
+  lock_();
+  _cfg.temperature_offset_c = offsetC;
+  unlock_();
+}
+
+float ConfigStore::temperatureOffsetC() const {
+  lock_();
+  const float value = _cfg.temperature_offset_c;
+  unlock_();
+  return value;
+}
+
+// ---- O2 measurement offset ----
+void ConfigStore::setO2MeasurementOffsetMgL(float offsetMgL) {
+  lock_();
+  _cfg.o2_measurement_offset_mg_l = offsetMgL;
+  unlock_();
+}
+
+float ConfigStore::o2MeasurementOffsetMgL() const {
+  lock_();
+  const float value = _cfg.o2_measurement_offset_mg_l;
+  unlock_();
+  return value;
+}
+
+// ---- O2 atmospheric pressure ----
+void ConfigStore::setO2AtmosphericPressureHpa(float pressureHpa) {
+  lock_();
+  _cfg.o2_atmospheric_pressure_hpa = pressureHpa;
+  unlock_();
+}
+
+float ConfigStore::o2AtmosphericPressureHpa() const {
+  lock_();
+  const float value = _cfg.o2_atmospheric_pressure_hpa;
+  unlock_();
+  return value;
 }
 
 // ---- WiFi ----

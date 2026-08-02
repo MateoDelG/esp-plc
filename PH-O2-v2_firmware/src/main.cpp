@@ -11,6 +11,9 @@
 #include "services/console/console_service.h"
 #include <ArduinoJson.h>
 #include <Arduino.h>
+#include <freertos/FreeRTOS.h>
+#include <freertos/queue.h>
+#include <freertos/semphr.h>
 #include <string.h>
 #include <globals.h>
 
@@ -32,6 +35,43 @@ WebPortalManager webPortal(&pumps, &levels, &uart2, &eeprom);
 ConsoleService consoleService;
 
 volatile bool autoCancelRequest = false;
+
+struct O2ReferenceRequest {
+  bool use_reference;
+  float ppm;
+  float temp_c;
+};
+
+QueueHandle_t o2ReferenceQueue = nullptr;
+SemaphoreHandle_t eepromWriteMutex = nullptr;
+SemaphoreHandle_t o2StateMutex = nullptr;
+volatile bool webO2CalibrationAllowed = false;
+static bool o2CalibrationFromWeb = false;
+static bool o2CalibrationUseReference = true;
+static float o2WebReferencePpm = 8.0f;
+static float o2WebReferenceTempC = 30.0f;
+volatile float temperatureOffsetC = 0.0f;
+volatile float lastRawTemperatureC = NAN;
+volatile float o2MeasurementOffsetMgL = 0.0f;
+volatile float o2AtmosphericPressureHpa = 1013.0f;
+
+static bool lockEEPROMWrite() {
+  return eepromWriteMutex &&
+         xSemaphoreTake(eepromWriteMutex, pdMS_TO_TICKS(1000)) == pdTRUE;
+}
+
+static void unlockEEPROMWrite() {
+  if (eepromWriteMutex) xSemaphoreGive(eepromWriteMutex);
+}
+
+static bool lockO2State() {
+  return o2StateMutex &&
+         xSemaphoreTake(o2StateMutex, pdMS_TO_TICKS(2000)) == pdTRUE;
+}
+
+static void unlockO2State() {
+  if (o2StateMutex) xSemaphoreGive(o2StateMutex);
+}
 
 bool startProcess = false;
 
@@ -60,6 +100,18 @@ void setup() {
   Serial.begin(115200);
   Serial2.begin(115200);
   initHardware();
+  o2ReferenceQueue = xQueueCreate(1, sizeof(O2ReferenceRequest));
+  eepromWriteMutex = xSemaphoreCreateMutex();
+  o2StateMutex = xSemaphoreCreateMutex();
+  if (!o2ReferenceQueue) {
+    Serial.println("No se pudo crear cola calibracion O2");
+  }
+  if (!eepromWriteMutex) {
+    Serial.println("No se pudo crear mutex EEPROM");
+  }
+  if (!o2StateMutex) {
+    Serial.println("No se pudo crear mutex O2");
+  }
   initDualCore();
   initEEPROM();
   initWiFi();
@@ -213,42 +265,61 @@ void initADC() {
 }
 
 void initPH() {
-  ph.begin();
+  if (!ph.begin()) {
+    remoteManager.log(String("pH init fallo: ") + ph.lastError());
+    return;
+  }
 
-  // Cargar calibración pH (V7, V4, tC) desde EEPROM
-  float V7 = NAN, V4 = NAN, tCalC = NAN;
-  eeprom.getPH2pt(V7, V4, tCalC);
-
-  const bool v7ok = !isnan(V7);
-  const bool v4ok = !isnan(V4);
-  bool tcok = (!isnan(tCalC) && tCalC > -40.0f && tCalC < 125.0f);
-
-  if (v7ok && v4ok) {
-    if (!tcok)
-      tCalC = 25.0f; // fallback razonable si no hay T guardada
-    ph.setTwoPointCalibration(7.00f, V7, 4.00f, V4, tCalC);
-
-    // Log de verificación
-    remoteManager.log(String("pH cal cargada: V7=") + String(V7, 5) + " V4=" +
-                      String(V4, 5) + " Tcal=" + String(tCalC, 1) + "C");
+  if (ph.applyEEPROMCalibration(eeprom)) {
+    remoteManager.log(ph.hasThreePointModel()
+                          ? "pH cal 3pt cargada desde EEPROM"
+                          : "pH cal 2pt cargada desde EEPROM");
   } else {
-    // No hay datos persistidos aún: dejar sin cal específica o valores por
-    // defecto
-    remoteManager.log(
-        "pH cal: no hay V7/V4 en EEPROM. Usa defaults o ejecuta cal.");
-    // Si tu clase 'ph' requiere un estado definido, puedes fijar un default
-    // aquí:
-    ph.setTwoPointCalibration(7.00f, 1.650f, 4.00f, 1.650f,
-                              25.0f); // (ejemplo neutro, opcional)
+    remoteManager.log(String("pH cal: ") + ph.lastError() +
+                      ". Usando modelo por defecto.");
   }
 }
 
 void initEEPROM() {
-  eeprom.begin(256);
+  if (!eeprom.begin(256)) {
+    Serial.println(eeprom.lastError());
+    return;
+  }
   if (!eeprom.load()) {
     eeprom.resetDefaults();
     eeprom.save();
   }
+  if (eeprom.migrationPending() && !eeprom.save()) {
+    Serial.println(eeprom.lastError());
+  }
+
+  float storedOffset = eeprom.temperatureOffsetC();
+  if (!isfinite(storedOffset) || storedOffset < -10.0f ||
+      storedOffset > 10.0f) {
+    storedOffset = 0.0f;
+    eeprom.setTemperatureOffsetC(storedOffset);
+    eeprom.save();
+  }
+  temperatureOffsetC = storedOffset;
+
+  float storedO2Offset = eeprom.o2MeasurementOffsetMgL();
+  if (!isfinite(storedO2Offset) || storedO2Offset < -5.0f ||
+      storedO2Offset > 5.0f) {
+    storedO2Offset = 0.0f;
+    eeprom.setO2MeasurementOffsetMgL(storedO2Offset);
+    eeprom.save();
+  }
+  o2MeasurementOffsetMgL = storedO2Offset;
+  uart2.setLastO2Values(NAN, storedO2Offset, NAN);
+
+  float storedPressure = eeprom.o2AtmosphericPressureHpa();
+  if (!isfinite(storedPressure) || storedPressure < 500.0f ||
+      storedPressure > 1100.0f) {
+    storedPressure = 1013.0f;
+    eeprom.setO2AtmosphericPressureHpa(storedPressure);
+    eeprom.save();
+  }
+  o2AtmosphericPressureHpa = storedPressure;
 
   // float m,b;
   // eeprom.getADC(m,b);
@@ -292,21 +363,149 @@ float readThermo() {
   if (thermo.sensorCount() == 0) {
     // Serial.println("Sin sensores");
     remoteManager.log("Sin sensores");
+    lastRawTemperatureC = NAN;
+    uart2.setLastTemperatures(NAN, NAN);
     // delay(1000);
     return -1;
   }
-  float c = thermo.readC(0);
-  if (isnan(c)) {
+  const float rawC = thermo.readC(0);
+  if (!isfinite(rawC)) {
     // Serial.println("Lectura inválida");
     remoteManager.log("Lectura inválida");
+    lastRawTemperatureC = NAN;
+    uart2.setLastTemperatures(NAN, NAN);
     return -1;
   } else {
+    const float correctedC = rawC + temperatureOffsetC;
+    if (!isfinite(correctedC) || correctedC < -55.0f ||
+        correctedC > 125.0f) {
+      remoteManager.log("Temperatura corregida invalida");
+      lastRawTemperatureC = rawC;
+      uart2.setLastTemperatures(rawC, NAN);
+      return -1;
+    }
+    lastRawTemperatureC = rawC;
     // Serial.printf("T0: %.2f °C\n", c);
-    remoteManager.log("T: " + String(c) + " °C");
-    uart2.setLastTempC(c);
-    return c;
+    remoteManager.log("T: " + String(correctedC) + " °C (raw=" +
+                      String(rawC) + ", off=" +
+                      String((float)temperatureOffsetC, 1) + ")");
+    uart2.setLastTemperatures(rawC, correctedC);
+    return correctedC;
   }
   // delay(1000);
+}
+
+static bool saveTemperatureOffsetC(float& newOffsetC, String& error) {
+  if (!isfinite(newOffsetC) || newOffsetC < -10.0f || newOffsetC > 10.0f) {
+    error = "offset fuera de rango";
+    return false;
+  }
+  newOffsetC = roundf(newOffsetC * 10.0f) / 10.0f;
+  if (!lockEEPROMWrite()) {
+    error = "eeprom busy";
+    return false;
+  }
+
+  const float previousOffset = eeprom.temperatureOffsetC();
+  eeprom.setTemperatureOffsetC(newOffsetC);
+  if (!eeprom.save()) {
+    eeprom.setTemperatureOffsetC(previousOffset);
+    error = eeprom.lastError();
+    unlockEEPROMWrite();
+    return false;
+  }
+
+  temperatureOffsetC = newOffsetC;
+  unlockEEPROMWrite();
+  error = "";
+  return true;
+}
+
+static bool saveO2MeasurementOffsetMgL(float& newOffsetMgL, String& error) {
+  if (!isfinite(newOffsetMgL) || newOffsetMgL < -5.0f ||
+      newOffsetMgL > 5.0f) {
+    error = "offset O2 fuera de rango";
+    return false;
+  }
+  newOffsetMgL = roundf(newOffsetMgL * 10.0f) / 10.0f;
+  if (!lockEEPROMWrite()) {
+    error = "eeprom busy";
+    return false;
+  }
+
+  const float previousOffset = eeprom.o2MeasurementOffsetMgL();
+  eeprom.setO2MeasurementOffsetMgL(newOffsetMgL);
+  if (!eeprom.save()) {
+    eeprom.setO2MeasurementOffsetMgL(previousOffset);
+    error = eeprom.lastError();
+    unlockEEPROMWrite();
+    return false;
+  }
+
+  o2MeasurementOffsetMgL = newOffsetMgL;
+  unlockEEPROMWrite();
+
+  float rawMgL = NAN, previousOffsetMgL = NAN, previousFinalMgL = NAN;
+  uart2.getLastO2Values(rawMgL, previousOffsetMgL, previousFinalMgL);
+  (void)previousOffsetMgL;
+  (void)previousFinalMgL;
+  if (isfinite(rawMgL)) {
+    uart2.setLastO2Values(rawMgL, newOffsetMgL, rawMgL + newOffsetMgL);
+  } else {
+    uart2.setLastO2Values(NAN, newOffsetMgL, NAN);
+  }
+  error = "";
+  return true;
+}
+
+static bool saveO2AtmosphericPressureHpa(float& newPressureHpa,
+                                         String& error) {
+  if (!isfinite(newPressureHpa) || newPressureHpa < 500.0f ||
+      newPressureHpa > 1100.0f) {
+    error = "presion fuera de rango";
+    return false;
+  }
+  newPressureHpa = roundf(newPressureHpa);
+  const float previousPressure = eeprom.o2AtmosphericPressureHpa();
+  if (fabsf(previousPressure - newPressureHpa) < 0.5f) {
+    error = "";
+    return true;
+  }
+  if (!lockO2State()) {
+    error = "O2 busy";
+    return false;
+  }
+  if (!lockEEPROMWrite()) {
+    error = "eeprom busy";
+    unlockO2State();
+    return false;
+  }
+
+  float storedV1, storedT1, storedV2, storedT2;
+  eeprom.getO2Cal(storedV1, storedT1, storedV2, storedT2);
+  const float previousOffset = eeprom.o2MeasurementOffsetMgL();
+  eeprom.setO2AtmosphericPressureHpa(newPressureHpa);
+  eeprom.setO2Cal(NAN, NAN, NAN, NAN);
+  eeprom.setO2MeasurementOffsetMgL(0.0f);
+  if (!eeprom.save()) {
+    eeprom.setO2AtmosphericPressureHpa(previousPressure);
+    eeprom.setO2Cal(storedV1, storedT1, storedV2, storedT2);
+    eeprom.setO2MeasurementOffsetMgL(previousOffset);
+    error = eeprom.lastError();
+    unlockEEPROMWrite();
+    unlockO2State();
+    return false;
+  }
+
+  o2AtmosphericPressureHpa = newPressureHpa;
+  o2MeasurementOffsetMgL = 0.0f;
+  o2.setAtmosphericPressureHpa(newPressureHpa);
+  o2.clearCalibration();
+  uart2.setLastO2Values(NAN, 0.0f, NAN);
+  unlockEEPROMWrite();
+  unlockO2State();
+  error = "";
+  return true;
 }
 
 float readPH() {
@@ -316,9 +515,8 @@ float readPH() {
 
   // 1) Leer temperatura actual (para compensación)
   float tC = readThermo();
-  bool tOk = isfinite(tC) && tC > -40.0f && tC < 125.0f;
+  bool tOk = isfinite(tC) && tC >= 0.0f && tC <= 40.0f;
   if (!tOk) tC = 25.0f; // fallback si el sensor falla
-  uart2.setLastTempC(tC);
 
   // 2) Leer pH con compensación de temperatura
   float phValue = NAN, volts = NAN;
@@ -364,44 +562,82 @@ float readPH() {
 float readO2() {
   extern float readThermo();
 
-  float tC = readThermo();
-  bool tOk = isfinite(tC) && tC > -40.0f && tC < 125.0f;
-  if (!tOk) tC = 25.0f;
-
-  float do_mgL = NAN, volts = NAN;
-  if (!o2.readDO(tC, do_mgL, &volts)) {
-    remoteManager.log(String("O2 ERR: ") + o2.lastError());
+  if (!lockO2State()) {
+    remoteManager.log("O2 ERR: recurso ocupado");
     return NAN;
   }
 
-  uart2.setLastO2(do_mgL);
+  float tC = readThermo();
+  bool tOk = isfinite(tC) && tC >= 0.0f && tC <= 40.0f;
+  if (!tOk) tC = 30.0f;
+
+  float rawDoMgL = NAN, volts = NAN;
+  if (!o2.readDO(tC, rawDoMgL, &volts)) {
+    remoteManager.log(String("O2 ERR: ") + o2.lastError());
+    unlockO2State();
+    return NAN;
+  }
+
+  const float finalDoMgL = rawDoMgL + o2MeasurementOffsetMgL;
+  uart2.setLastO2Values(rawDoMgL, o2MeasurementOffsetMgL, finalDoMgL);
 
   remoteManager.log(
-    "O2 = " + String(do_mgL, 3) +
-    " mg/L  V=" + String(volts, 4) +
+    "O2 = " + String(finalDoMgL, 3) +
+    " mg/L raw=" + String(rawDoMgL, 3) +
+    " off=" + String((float)o2MeasurementOffsetMgL, 1) +
+    " V=" + String(volts, 4) +
     "  T=" + String(tC, 1) + "°C"
   );
 
-  return do_mgL;
+  unlockO2State();
+  return finalDoMgL;
 }
 
 void initO2() {
-  o2.begin();
+  if (!o2.begin()) {
+    remoteManager.log(String("O2 init fallo: ") + o2.lastError());
+    return;
+  }
+  if (!o2.setAtmosphericPressureHpa(o2AtmosphericPressureHpa)) {
+    remoteManager.log(String("O2 presion invalida: ") + o2.lastError());
+    return;
+  }
 
   if (o2.applyEEPROMCalibration(eeprom)) {
-    float V1, T1, V2, T2;
-    o2.getTwoPointCalibration(V1, T1, V2, T2);
-    remoteManager.log(String("O2 cal cargada: V1=") + String(V1, 1) +
-                      "mV T1=" + String(T1, 1) + "C V2=" +
-                      String(V2, 1) + "mV T2=" + String(T2, 1) + "C");
+    float V1, T1;
+    o2.getSinglePointCalibration(V1, T1);
+    remoteManager.log(String("O2 cal 1p cargada: V=") + String(V1, 1) +
+                      "mV T=" + String(T1, 1) + "C");
+
+    float storedV1, storedT1, storedV2, storedT2;
+    eeprom.getO2Cal(storedV1, storedT1, storedV2, storedT2);
+    if (isfinite(storedV2) || isfinite(storedT2)) {
+      if (!lockEEPROMWrite()) {
+        remoteManager.log("O2 migracion 1p: EEPROM ocupada");
+      } else {
+        eeprom.setO2Cal(storedV1, storedT1, NAN, NAN);
+        if (!eeprom.save()) {
+          eeprom.setO2Cal(storedV1, storedT1, storedV2, storedT2);
+          remoteManager.log(String("O2 migracion 1p fallo: ") +
+                            eeprom.lastError());
+        } else {
+          remoteManager.log("O2 cal antigua migrada a 1p");
+        }
+        unlockEEPROMWrite();
+      }
+    }
   } else {
     remoteManager.log(String("O2 cal: ") + o2.lastError());
   }
 }
 
 static bool handleWebAction(const String& action, const String& value, String& outMessage) {
-  (void)value;
   if (action == "auto_start") {
+    if (uart2.getBusy() || uart2.getAutoRunning() ||
+        uart2.getAutoMeasureRequested()) {
+      outMessage = "equipo ocupado";
+      return false;
+    }
     uart2.setAutoMeasureRequested(true);
     outMessage = "auto requested";
     return true;
@@ -412,18 +648,162 @@ static bool handleWebAction(const String& action, const String& value, String& o
     return true;
   }
   if (action == "read_ph") {
+    if (uart2.getBusy() || uart2.getAutoRunning() ||
+        uart2.getAutoMeasureRequested()) {
+      outMessage = "equipo ocupado";
+      return false;
+    }
     float v = readPH();
     outMessage = String("ph=") + String(v, 2);
     return true;
   }
   if (action == "read_o2") {
+    if (uart2.getBusy() || uart2.getAutoRunning() ||
+        uart2.getAutoMeasureRequested()) {
+      outMessage = "equipo ocupado";
+      return false;
+    }
     float v = readO2();
+    if (!isfinite(v)) {
+      outMessage = o2.hasCalibration() ? "lectura O2 fallo"
+                                       : "calibracion O2 requerida";
+      return false;
+    }
     outMessage = String("o2=") + String(v, 3);
     return true;
   }
   if (action == "read_temp") {
+    if (uart2.getBusy() || uart2.getAutoRunning() ||
+        uart2.getAutoMeasureRequested()) {
+      outMessage = "equipo ocupado";
+      return false;
+    }
     float t = readThermo();
     outMessage = String("temp=") + String(t, 1);
+    return true;
+  }
+  if (action == "set_temp_offset") {
+    if (uart2.getBusy() || uart2.getAutoRunning() ||
+        uart2.getAutoMeasureRequested()) {
+      outMessage = "equipo ocupado";
+      return false;
+    }
+
+    JsonDocument doc;
+    DeserializationError err = deserializeJson(doc, value);
+    if (err || !doc["offset_c"].is<float>()) {
+      outMessage = "offset invalido";
+      return false;
+    }
+
+    float requestedOffset = doc["offset_c"].as<float>();
+    String saveError;
+    if (!saveTemperatureOffsetC(requestedOffset, saveError)) {
+      outMessage = saveError;
+      return false;
+    }
+
+    outMessage = String("offset temperatura=") + String(requestedOffset, 1) +
+                 "C";
+    remoteManager.log(outMessage);
+    return true;
+  }
+  if (action == "set_o2_offset") {
+    if (uart2.getBusy() || uart2.getAutoRunning() ||
+        uart2.getAutoMeasureRequested()) {
+      outMessage = "equipo ocupado";
+      return false;
+    }
+
+    JsonDocument doc;
+    DeserializationError err = deserializeJson(doc, value);
+    if (err || !doc["offset_mg_l"].is<float>()) {
+      outMessage = "offset O2 invalido";
+      return false;
+    }
+
+    float requestedOffset = doc["offset_mg_l"].as<float>();
+    String saveError;
+    if (!saveO2MeasurementOffsetMgL(requestedOffset, saveError)) {
+      outMessage = saveError;
+      return false;
+    }
+
+    outMessage = String("offset O2=") + String(requestedOffset, 1) + "mg/L";
+    remoteManager.log(outMessage);
+    return true;
+  }
+  if (action == "set_o2_pressure") {
+    if (uart2.getBusy() || uart2.getAutoRunning() ||
+        uart2.getAutoMeasureRequested()) {
+      outMessage = "equipo ocupado";
+      return false;
+    }
+
+    JsonDocument doc;
+    DeserializationError err = deserializeJson(doc, value);
+    if (err || !doc["pressure_hpa"].is<float>()) {
+      outMessage = "presion O2 invalida";
+      return false;
+    }
+
+    float requestedPressure = doc["pressure_hpa"].as<float>();
+    const float previousPressure = o2AtmosphericPressureHpa;
+    String saveError;
+    if (!saveO2AtmosphericPressureHpa(requestedPressure, saveError)) {
+      outMessage = saveError;
+      return false;
+    }
+
+    if (fabsf(previousPressure - requestedPressure) >= 0.5f) {
+      uart2.setLastResult("O2_PRESSURE_CHANGED_RECALIBRATE");
+      outMessage = String("presion=") + String(requestedPressure, 0) +
+                   "hPa; recalibre O2";
+    } else {
+      outMessage = "presion O2 sin cambios";
+    }
+    remoteManager.log(outMessage);
+    return true;
+  }
+  if (action == "o2_cal_reference" || action == "o2_cal_saturation") {
+    if (!o2ReferenceQueue || !webO2CalibrationAllowed ||
+        uart2.getAutoRunning() || uart2.getAutoMeasureRequested() ||
+        uart2.getBusy()) {
+      outMessage = "equipo ocupado";
+      return false;
+    }
+
+    const bool useReference = action == "o2_cal_reference";
+    O2ReferenceRequest request{useReference, 0.0f, 30.0f};
+    if (useReference) {
+      JsonDocument doc;
+      DeserializationError err = deserializeJson(doc, value);
+      if (err || !doc["ppm"].is<float>() || !doc["temp_c"].is<float>()) {
+        outMessage = "datos patron invalidos";
+        return false;
+      }
+
+      request.ppm = doc["ppm"].as<float>();
+      request.temp_c = doc["temp_c"].as<float>();
+      if (!isfinite(request.ppm) || request.ppm < 0.10f ||
+          request.ppm > 20.0f || !isfinite(request.temp_c) ||
+          request.temp_c < 0.0f || request.temp_c > 40.0f) {
+        outMessage = "patron fuera de rango";
+        return false;
+      }
+    }
+
+    uart2.setLastResult(useReference ? "CAL_O2_REF_PENDING"
+                                     : "CAL_O2_1P_PENDING");
+    if (xQueueSend(o2ReferenceQueue, &request, 0) != pdTRUE) {
+      uart2.setLastResult(useReference ? "CAL_O2_REF_QUEUE_ERR"
+                                       : "CAL_O2_1P_QUEUE_ERR");
+      outMessage = "calibracion ya solicitada";
+      return false;
+    }
+
+    outMessage = useReference ? "calibracion O2 patron solicitada"
+                              : "calibracion O2 1p solicitada";
     return true;
   }
   if (action == "toggle_pump") {
@@ -451,6 +831,10 @@ static bool handleWebAction(const String& action, const String& value, String& o
     return true;
   }
   if (action == "wifi_apply") {
+    if (uart2.getBusy()) {
+      outMessage = "equipo ocupado";
+      return false;
+    }
     JsonDocument doc;
     DeserializationError err = deserializeJson(doc, value);
     if (err) {
@@ -470,8 +854,14 @@ static bool handleWebAction(const String& action, const String& value, String& o
       return false;
     }
 
+    if (!lockEEPROMWrite()) {
+      outMessage = "eeprom busy";
+      return false;
+    }
     eeprom.setWifiCredentials(ssid, pass);
-    if (!eeprom.save()) {
+    const bool saved = eeprom.save();
+    unlockEEPROMWrite();
+    if (!saved) {
       outMessage = "eeprom save fail";
       remoteManager.log(String("WiFi EEPROM save: ") + eeprom.lastError());
       return false;
@@ -483,6 +873,10 @@ static bool handleWebAction(const String& action, const String& value, String& o
     return ok;
   }
   if (action == "wifi_auto_reconnect") {
+    if (uart2.getBusy()) {
+      outMessage = "equipo ocupado";
+      return false;
+    }
     JsonDocument doc;
     DeserializationError err = deserializeJson(doc, value);
     if (err) {
@@ -490,8 +884,14 @@ static bool handleWebAction(const String& action, const String& value, String& o
       return false;
     }
     const bool enabled = doc["enabled"] | false;
+    if (!lockEEPROMWrite()) {
+      outMessage = "eeprom busy";
+      return false;
+    }
     eeprom.setWifiAutoReconnect(enabled);
-    if (!eeprom.save()) {
+    const bool saved = eeprom.save();
+    unlockEEPROMWrite();
+    if (!saved) {
       outMessage = "eeprom save fail";
       remoteManager.log(String("WiFi auto reconnect save: ") + eeprom.lastError());
       return false;
@@ -502,6 +902,10 @@ static bool handleWebAction(const String& action, const String& value, String& o
     return true;
   }
   if (action == "set_times") {
+    if (uart2.getBusy()) {
+      outMessage = "equipo ocupado";
+      return false;
+    }
     JsonDocument doc;
     DeserializationError err = deserializeJson(doc, value);
     if (err) {
@@ -537,6 +941,10 @@ static bool handleWebAction(const String& action, const String& value, String& o
     uint32_t phStab = readU("ph_stabilization_s", (uint32_t)(eeprom.phStabilizationMs() / 1000UL));
     uint8_t sampleCount = readSampleCount("sample_count", (uint8_t)eeprom.sampleCount());
 
+    if (!lockEEPROMWrite()) {
+      outMessage = "eeprom busy";
+      return false;
+    }
     eeprom.setKclFillMs(kclFill * 1000UL);
     eeprom.setH2oFillMs(h2oFill * 1000UL);
     eeprom.setSampleFillMs(sampleFill * 1000UL);
@@ -546,7 +954,13 @@ static bool handleWebAction(const String& action, const String& value, String& o
     eeprom.setO2StabilizationMs(o2Stab * 1000UL);
     eeprom.setPhStabilizationMs(phStab * 1000UL);
     eeprom.setSampleCount(sampleCount);
-    eeprom.save();
+    const bool saved = eeprom.save();
+    unlockEEPROMWrite();
+    if (!saved) {
+      outMessage = "eeprom save fail";
+      remoteManager.log(String("Times EEPROM save: ") + eeprom.lastError());
+      return false;
+    }
 
     outMessage = "times saved";
     remoteManager.log(outMessage);
@@ -679,8 +1093,15 @@ static bool runADSCalibration_0V_3p31V(uint8_t channel = 0,
     ads.setCalibration(scale, offset);
 
     // Persiste en EEPROM (usa tu instancia global 'eeprom')
+    if (!lockEEPROMWrite()) {
+      showError("EEPROM", "Ocupada");
+      step = Step::DONE;
+      return false;
+    }
     eeprom.setADC(scale, offset);
-    if (!eeprom.save()) {
+    const bool adcSaved = eeprom.save();
+    unlockEEPROMWrite();
+    if (!adcSaved) {
       remoteManager.log(String("EEPROM save fallo: ") + eeprom.lastError());
       showError("EEPROM", "Save fallo");
       step = Step::DONE; // igual finalizamos
@@ -860,13 +1281,18 @@ static bool runPHCalibration_7_4(uint8_t samples = 64) {
       ph.setTwoPointCalibration(7.00f, V7, 4.00f, V4, tCalC);
 
       // Persistir en EEPROM (2p) e invalidar 3p
-      eeprom.setPH2pt(V7, V4, tCalC);
-      eeprom.setPH3pt(NAN, NAN, NAN, NAN);
+      const bool eepromLocked = lockEEPROMWrite();
+      if (eepromLocked) {
+        eeprom.setPH2pt(V7, V4, tCalC);
+        eeprom.setPH3pt(NAN, NAN, NAN, NAN);
       #ifdef CONFIGSTORE_HAS_PH_CAL_MODE
         eeprom.setPHCalMode(ConfigStore::PHCalMode::PH2);
       #endif
+      }
 
-      if (!eeprom.save()) {
+      const bool ph2Saved = eepromLocked && eeprom.save();
+      if (eepromLocked) unlockEEPROMWrite();
+      if (!ph2Saved) {
         if (&remoteManager) remoteManager.log(String("EEPROM save PH2pt fallo: ") + eeprom.lastError());
       } else {
         if (&remoteManager) remoteManager.log("EEPROM: PH2pt guardado (3p invalidado)");
@@ -1054,15 +1480,21 @@ static bool runPHCalibration_4_7_10(uint16_t samples = 64, bool piecewise = fals
         splash("Cal pH 3pt","incompleta", 900); step = Step::CANCEL; return false;
       }
 
-      // Persistencia primero
-      eeprom.setPH3pt(V4, V7, V10, tCalC);
+      // Persistir 3p e invalidar cualquier calibración 2p anterior.
+      const bool eepromLocked = lockEEPROMWrite();
+      if (eepromLocked) {
+        eeprom.setPH3pt(V4, V7, V10, tCalC);
+        eeprom.setPH2pt(NAN, NAN, NAN);
       #ifdef CONFIGSTORE_HAS_PH_CAL_MODE
         eeprom.setPHCalMode(ConfigStore::PHCalMode::PH3);
       #endif
-      if (!eeprom.save()) {
+      }
+      const bool ph3Saved = eepromLocked && eeprom.save();
+      if (eepromLocked) unlockEEPROMWrite();
+      if (!ph3Saved) {
         if (&remoteManager) remoteManager.log(String("EEPROM save PH3pt fallo: ")+eeprom.lastError());
       } else {
-        if (&remoteManager) remoteManager.log("EEPROM: PH3pt guardado");
+        if (&remoteManager) remoteManager.log("EEPROM: PH3pt guardado (2p invalidado)");
       }
 
       // Aplicar al PHManager (modo PW o LS según flag)
@@ -1133,6 +1565,10 @@ static bool PumpFillLearnWizard() {
 
   // Guardado según layout v6
   auto saveDurationMs = [&](ItemId id, uint32_t ms){
+    if (!lockEEPROMWrite()) {
+      remoteManager.log("Fill learn: EEPROM ocupada");
+      return;
+    }
     if (id == ItemId::DRAIN) ms = (ms < 500UL) ? 500UL : ms;
     else                     ms = (ms < 100UL) ? 100UL : ms;
     switch(id){
@@ -1142,7 +1578,10 @@ static bool PumpFillLearnWizard() {
       case ItemId::DRAIN:       eeprom.setDrainMs(ms);       break;
       default: break;
     }
-    eeprom.save();
+    if (!eeprom.save()) {
+      remoteManager.log(String("Fill learn EEPROM: ") + eeprom.lastError());
+    }
+    unlockEEPROMWrite();
   };
 
   auto renderSelect = [&](bool force=false){
@@ -1316,9 +1755,19 @@ static bool PumpTimeoutsWizard() {
 
       if (Buttons::BTN_OK.value){
         Buttons::BTN_OK.reset();
+        if (!lockEEPROMWrite()) {
+          lcd.splash("EEPROM", "Ocupada", 700);
+          step=Step::DONE; return false;
+        }
         if(items[cursor].isSeconds) setSecs(items[cursor].id, editValue);
         else                        setSamples(editValue);
-        eeprom.save();
+        const bool saved = eeprom.save();
+        unlockEEPROMWrite();
+        if (!saved) {
+          remoteManager.log(String("Timeouts EEPROM: ") + eeprom.lastError());
+          lcd.splash("EEPROM", "Save fallo", 700);
+          step=Step::DONE; return false;
+        }
         char l0[17], l1[17];
         snprintf(l0,sizeof(l0),"%-8s GUARD",items[cursor].name);
         if(items[cursor].isSeconds) snprintf(l1,sizeof(l1),"%ld s",(long)editValue);
@@ -2056,6 +2505,17 @@ static bool AutoModeTick() {
         show(L0, L1);
 
         float o2v = readO2();
+        if (!isfinite(o2v)) {
+          pumps.allOff();
+          uart2.setLastResult(o2.hasCalibration() ? "AUTO_O2_READ_ERROR"
+                                                  : "AUTO_O2_CAL_REQUIRED");
+          lcd.splash("AUTO O2 error",
+                     o2.hasCalibration() ? "Lectura fallo" : "Recalibre O2",
+                     900);
+          started = false; idx = 0; phase = Phase::ENTER;
+          currentSample = 0; totalSamples = 0;
+          return true;
+        }
         uint8_t sampleId = (uint8_t)(currentSample + 1);
         if (sampleId < 1) sampleId = 1;
         if (sampleId > 4) sampleId = 4;
@@ -2112,7 +2572,11 @@ static bool AutoModeTick() {
   return false;
 }
 
-static bool runO2Calibration_1P(uint8_t samples = 31) {
+static bool runO2Calibration_1P(uint8_t samples,
+                               bool referenceMode,
+                               bool webRequest,
+                               float webReferencePpm,
+                               float webReferenceTempC) {
   extern O2Manager              o2;
   extern ADS1115Manager         ads;
   extern float                  readThermo();
@@ -2120,7 +2584,9 @@ static bool runO2Calibration_1P(uint8_t samples = 31) {
 
   enum class Step : uint8_t {
     START,
-    WAIT,
+    EDIT_PPM,
+    EDIT_TEMP,
+    CONFIRM,
     CAPT,
     APPLY,
     DONE,
@@ -2128,13 +2594,36 @@ static bool runO2Calibration_1P(uint8_t samples = 31) {
   };
   static Step step = Step::START;
 
-  static float V1_mV = NAN;
-  static float T1_C = NAN;
+  static int16_t referencePpm100 = 800;
+  static int16_t referenceTemp10 = 300;
+  static float measured_mV = NAN;
+  static float measuredTempC = NAN;
 
   auto title = []() { lcd.printAt(0, 0, "Calibrar O2"); };
-  auto ask = [&]() { title(); lcd.printAt(0, 1, "Punto  OK"); };
   auto busy = [&](const char* m) { title(); lcd.printAt(0, 1, m); };
   auto showErr = [](const char* a, const char* b = "") { lcd.splash(a, b, 900); };
+  auto renderPpm = [&]() {
+    char line[17];
+    snprintf(line, sizeof(line), "PPM: %2d.%02d",
+             referencePpm100 / 100, referencePpm100 % 100);
+    lcd.printAt(0, 0, "Patron O2 PPM");
+    lcd.printAt(0, 1, line);
+  };
+  auto renderTemp = [&]() {
+    char line[17];
+    snprintf(line, sizeof(line), "Temp: %2d.%1d C",
+             referenceTemp10 / 10, referenceTemp10 % 10);
+    lcd.printAt(0, 0, "Patron O2 Temp");
+    lcd.printAt(0, 1, line);
+  };
+  auto renderConfirm = [&]() {
+    char line[17];
+    snprintf(line, sizeof(line), "%d.%02dppm %d.%dC",
+             referencePpm100 / 100, referencePpm100 % 100,
+             referenceTemp10 / 10, referenceTemp10 % 10);
+    lcd.printAt(0, 0, "OK medir ESC<");
+    lcd.printAt(0, 1, line);
+  };
 
   auto insertionSort = [](float* arr, uint16_t n){
     for (uint16_t i = 1; i < n; ++i) {
@@ -2176,62 +2665,237 @@ static bool runO2Calibration_1P(uint8_t samples = 31) {
 
   switch (step) {
     case Step::START: {
-      ads.setAveraging(samples);
       lcd.clear();
-      ask();
-      step = Step::WAIT;
+      if (!referenceMode) {
+        referenceTemp10 = 300;
+        if (webRequest) {
+          busy("Solicitud web");
+          step = Step::CAPT;
+        } else {
+          lcd.printAt(0, 0, "O2 1P aire");
+          lcd.printAt(0, 1, "OK medir ESC");
+          step = Step::CONFIRM;
+        }
+      } else if (webRequest) {
+        referencePpm100 = (int16_t)lroundf(webReferencePpm * 100.0f);
+        referenceTemp10 = (int16_t)lroundf(webReferenceTempC * 10.0f);
+        busy("Solicitud web");
+        step = Step::CAPT;
+      } else {
+        referencePpm100 = 800;
+        referenceTemp10 = 300;
+        renderPpm();
+        step = Step::EDIT_PPM;
+      }
       return false;
     }
 
-    case Step::WAIT: {
+    case Step::EDIT_PPM: {
       if (Buttons::BTN_ESC.value) { Buttons::BTN_ESC.reset(); step = Step::CANCEL; return false; }
-      if (Buttons::BTN_OK.value)  { Buttons::BTN_OK.reset();  step = Step::CAPT; return false; }
+      if (Buttons::BTN_UP.value) {
+        Buttons::BTN_UP.reset();
+        if (referencePpm100 < 2000) ++referencePpm100;
+        renderPpm();
+      }
+      if (Buttons::BTN_DOWN.value) {
+        Buttons::BTN_DOWN.reset();
+        if (referencePpm100 > 10) --referencePpm100;
+        renderPpm();
+      }
+      if (Buttons::BTN_OK.value) {
+        Buttons::BTN_OK.reset();
+        lcd.clear();
+        renderTemp();
+        step = Step::EDIT_TEMP;
+      }
+      return false;
+    }
+
+    case Step::EDIT_TEMP: {
+      if (Buttons::BTN_ESC.value) {
+        Buttons::BTN_ESC.reset();
+        lcd.clear();
+        renderPpm();
+        step = Step::EDIT_PPM;
+        return false;
+      }
+      if (Buttons::BTN_UP.value) {
+        Buttons::BTN_UP.reset();
+        if (referenceTemp10 < 400) ++referenceTemp10;
+        renderTemp();
+      }
+      if (Buttons::BTN_DOWN.value) {
+        Buttons::BTN_DOWN.reset();
+        if (referenceTemp10 > 0) --referenceTemp10;
+        renderTemp();
+      }
+      if (Buttons::BTN_OK.value) {
+        Buttons::BTN_OK.reset();
+        lcd.clear();
+        renderConfirm();
+        step = Step::CONFIRM;
+      }
+      return false;
+    }
+
+    case Step::CONFIRM: {
+      if (Buttons::BTN_ESC.value) {
+        Buttons::BTN_ESC.reset();
+        if (referenceMode) {
+          lcd.clear();
+          renderTemp();
+          step = Step::EDIT_TEMP;
+        } else {
+          step = Step::CANCEL;
+        }
+        return false;
+      }
+      if (Buttons::BTN_OK.value) {
+        Buttons::BTN_OK.reset();
+        step = Step::CAPT;
+      }
       return false;
     }
 
     case Step::CAPT: {
       busy("Calibrando...");
       float v = medianVoltADS(samples);
-      float tC = readThermo();
-      bool tOk = isfinite(tC) && tC > -40.0f && tC < 125.0f;
-      if (!tOk) tC = 25.0f;
 
       if (!isfinite(v)) {
         showErr("O2 cal", "Voltaje invalido");
+        uart2.setLastResult(referenceMode ? "CAL_O2_REF_VOLT_ERR"
+                                          : "CAL_O2_1P_VOLT_ERR");
         step = Step::DONE;
         return false;
       }
 
-      V1_mV = v * 1000.0f;
-      T1_C = tC;
+      const float localTempC = readThermo();
+      if (!isfinite(localTempC) || localTempC < 0.0f || localTempC > 40.0f) {
+        showErr("O2 cal", "Temp sensor err");
+        uart2.setLastResult(referenceMode ? "CAL_O2_REF_TEMP_ERR"
+                                          : "CAL_O2_1P_TEMP_ERR");
+        step = Step::DONE;
+        return false;
+      }
+
+      const float expectedTempC = (float)referenceTemp10 / 10.0f;
+      if (referenceMode && fabsf(localTempC - expectedTempC) > 1.0f) {
+        remoteManager.log(String("O2 cal: diferencia temperatura local=") +
+                          String(localTempC, 1) + "C esperada=" +
+                          String(expectedTempC, 1) + "C");
+      }
+
+      measured_mV = v * 1000.0f;
+      measuredTempC = localTempC;
       lcd.splash("Punto OK", "", 700);
       step = Step::APPLY;
       return false;
     }
 
     case Step::APPLY: {
-      o2.setSinglePointCalibration(V1_mV, T1_C);
-      eeprom.setO2Cal(V1_mV, T1_C, NAN, NAN);
-      if (!eeprom.save()) {
-        remoteManager.log(String("EEPROM save fallo: ") + eeprom.lastError());
-        showErr("EEPROM", "Save fallo");
+      if (!lockO2State()) {
+        showErr("O2 cal", "Recurso ocupado");
+        uart2.setLastResult(referenceMode ? "CAL_O2_REF_SAVE_ERR"
+                                          : "CAL_O2_1P_SAVE_ERR");
+        step = Step::DONE;
+        return false;
+      }
+      const float referencePpm = (float)referencePpm100 / 100.0f;
+      const float patternTempC = (float)referenceTemp10 / 10.0f;
+      const float calibrationTempC = measuredTempC;
+      float calculatedVsat_mV = measured_mV;
+      if (referenceMode &&
+          !o2.calculateReferenceCalibration(measured_mV, referencePpm,
+                                             calibrationTempC,
+                                             calculatedVsat_mV)) {
+        remoteManager.log(String("O2 patron invalido: ") + o2.lastError());
+        showErr("O2 patron", "Fuera de rango");
+        uart2.setLastResult("CAL_O2_REF_INVALID");
+        unlockO2State();
         step = Step::DONE;
         return false;
       }
 
-      remoteManager.log(String("O2 cal 1p aplicada: V=") + String(V1_mV, 1) +
-                        "mV T=" + String(T1_C, 1) + "C");
+      float previousV, previousT;
+      const bool previousCalibrationValid = o2.hasCalibration();
+      float storedV1, storedT1, storedV2, storedT2;
+      float storedMeasurementOffset = NAN;
+      if (!lockEEPROMWrite()) {
+        remoteManager.log("O2 cal: EEPROM ocupada");
+        showErr("EEPROM", "Ocupada");
+        uart2.setLastResult(referenceMode ? "CAL_O2_REF_SAVE_ERR"
+                                          : "CAL_O2_1P_SAVE_ERR");
+        unlockO2State();
+        step = Step::DONE;
+        return false;
+      }
+      o2.getSinglePointCalibration(previousV, previousT);
+      eeprom.getO2Cal(storedV1, storedT1, storedV2, storedT2);
+      storedMeasurementOffset = eeprom.o2MeasurementOffsetMgL();
+
+      if (!o2.setSinglePointCalibration(calculatedVsat_mV, calibrationTempC)) {
+        remoteManager.log(String("O2 cal 1p invalida: ") + o2.lastError());
+        showErr("O2 cal", "Datos invalidos");
+        uart2.setLastResult(referenceMode ? "CAL_O2_REF_INVALID"
+                                          : "CAL_O2_1P_INVALID");
+        unlockEEPROMWrite();
+        unlockO2State();
+        step = Step::DONE;
+        return false;
+      }
+
+      eeprom.setO2Cal(calculatedVsat_mV, calibrationTempC, NAN, NAN);
+      eeprom.setO2MeasurementOffsetMgL(0.0f);
+      if (!eeprom.save()) {
+        remoteManager.log(String("EEPROM save fallo: ") + eeprom.lastError());
+        eeprom.setO2Cal(storedV1, storedT1, storedV2, storedT2);
+        eeprom.setO2MeasurementOffsetMgL(storedMeasurementOffset);
+        if (previousCalibrationValid) {
+          o2.setSinglePointCalibration(previousV, previousT);
+        } else {
+          o2.clearCalibration();
+        }
+        unlockEEPROMWrite();
+        unlockO2State();
+        showErr("EEPROM", "Save fallo");
+        uart2.setLastResult(referenceMode ? "CAL_O2_REF_SAVE_ERR"
+                                          : "CAL_O2_1P_SAVE_ERR");
+        step = Step::DONE;
+        return false;
+      }
+      o2MeasurementOffsetMgL = 0.0f;
+      unlockEEPROMWrite();
+
+      uart2.setLastO2Values(NAN, 0.0f, NAN);
+      unlockO2State();
+
+      if (referenceMode) {
+        remoteManager.log(String("O2 patron OK: ref=") +
+                          String(referencePpm, 2) + "ppm Tsensor=" +
+                          String(calibrationTempC, 1) + "C Tpatron=" +
+                          String(patternTempC, 1) + "C Vmed=" +
+                          String(measured_mV, 1) + "mV Vsat=" +
+                          String(calculatedVsat_mV, 1) + "mV");
+      } else {
+        remoteManager.log(String("O2 1P saturacion OK: Tsensor=") +
+                          String(calibrationTempC, 1) + "C Vsat=" +
+                          String(calculatedVsat_mV, 1) + "mV");
+      }
       char l2[17];
-      snprintf(l2, sizeof(l2), "V=%.0f T=%.1f", V1_mV, T1_C);
-      lcd.splash("O2 calibrado", l2, 800);
+      snprintf(l2, sizeof(l2), "Vsat=%.0fmV", calculatedVsat_mV);
+      lcd.splash(referenceMode ? "O2 patron OK" : "O2 1P OK", l2, 900);
+      uart2.setLastResult(referenceMode ? "CAL_O2_REF_OK" : "CAL_O2_1P_OK");
 
       step = Step::DONE;
       return false;
     }
 
     case Step::CANCEL:
-      remoteManager.log("O2 cal 1p: CANCEL");
+      remoteManager.log(referenceMode ? "O2 patron: CANCEL"
+                                      : "O2 1P: CANCEL");
       showErr("Calibracion", "Cancelada");
+      uart2.setLastResult(referenceMode ? "CAL_O2_REF_CANCEL"
+                                        : "CAL_O2_1P_CANCEL");
       step = Step::DONE;
       return false;
 
@@ -2243,6 +2907,7 @@ static bool runO2Calibration_1P(uint8_t samples = 31) {
   return false;
 }
 
+#if 0 // Calibracion O2 2P deshabilitada; se conserva solo como referencia.
 static bool runO2Calibration_2P(uint8_t samples = 31) {
   extern O2Manager              o2;
   extern ADS1115Manager         ads;
@@ -2403,6 +3068,7 @@ static bool runO2Calibration_2P(uint8_t samples = 31) {
       return true;
   }
 }
+#endif
 
 static void MenuDemoTick() {
   // --- prototipos externos que usa el menú ---
@@ -2410,8 +3076,10 @@ static void MenuDemoTick() {
   extern bool  runADSCalibration_0V_3p31V(uint8_t, uint8_t);
   extern bool  runPHCalibration_7_4(uint8_t samples);
   extern bool  runPHCalibration_4_7_10(uint16_t samples, bool piecewise);
-  extern bool  runO2Calibration_1P(uint8_t samples);
-  extern bool  runO2Calibration_2P(uint8_t samples);
+  extern bool  runO2Calibration_1P(uint8_t samples, bool referenceMode,
+                                   bool webRequest,
+                                   float webReferencePpm,
+                                   float webReferenceTempC);
   extern float readADC();
   extern float readPH();
   extern float readO2();
@@ -2446,7 +3114,8 @@ static void MenuDemoTick() {
     CAL_O2_MENU,
     CAL_O2_READ,
     CAL_O2_RUN_1P,
-    CAL_O2_RUN_2P,
+    O2_OFFSET,
+    O2_PRESSURE,
     CFG_TIMEOUTS,
     CFG_FILL
   };
@@ -2481,17 +3150,21 @@ static void MenuDemoTick() {
   static uint8_t phCursor = 0;
   const uint8_t PH_N = sizeof(phItems) / sizeof(phItems[0]);
 
-  // ---- Submenú O2: leer + calibración 2 puntos ----
+  // ---- Submenú O2: lectura, calibraciones y offset independiente ----
   static const char *o2Items[] = {
     "Leer O2",
-    "Cal O2 (1p)",
-    "Cal O2 (2p)"
+    "Cal 1P aire",
+    "Cal O2 patron",
+    "Offset O2",
+    "Presion O2"
   };
   static uint8_t o2Cursor = 0;
   const uint8_t O2_N = sizeof(o2Items) / sizeof(o2Items[0]);
 
   // ---- Temperatura ----
-  static int8_t tempOffset = 0;
+  static int16_t tempOffset10 = 0;
+  static int8_t o2Offset10 = 0;
+  static int16_t o2PressureHpa = 1013;
   static float lastTemp = -1.0f;
   static unsigned long lastReadMs = 0;
   const unsigned long TEMP_READ_PERIOD = 500; // ms
@@ -2516,7 +3189,7 @@ static void MenuDemoTick() {
     else l0 += " --.- C";
     lcd.printAt(0, 0, l0);
     char buf[17];
-    snprintf(buf, sizeof(buf), "Off:%+d", (int)tempOffset);
+    snprintf(buf, sizeof(buf), "Off:%+.1f C", (float)tempOffset10 / 10.0f);
     lcd.printAt(0, 1, buf);
   };
   auto renderADSMenu = [&]() {
@@ -2530,6 +3203,18 @@ static void MenuDemoTick() {
   auto renderO2Menu = [&]() {
     lcd.printAt(0, 0, "Calibrar O2");
     lcd.printAt(0, 1, ">" + String(o2Items[o2Cursor]));
+  };
+  auto renderO2Offset = [&]() {
+    char line[17];
+    snprintf(line, sizeof(line), "%+.1f mg/L", (float)o2Offset10 / 10.0f);
+    lcd.printAt(0, 0, "Offset O2");
+    lcd.printAt(0, 1, line);
+  };
+  auto renderO2Pressure = [&]() {
+    char line[17];
+    snprintf(line, sizeof(line), "%d hPa", (int)o2PressureHpa);
+    lcd.printAt(0, 0, "Presion O2");
+    lcd.printAt(0, 1, line);
   };
   auto renderADSRead = [&]() {
     float v = readADC();
@@ -2549,9 +3234,16 @@ static void MenuDemoTick() {
     lcd.printAt(0, 0, "Leyendo");
     lcd.printAt(0, 1, " ");
     float o2v = readO2();
-    char l0[17]; snprintf(l0, sizeof(l0), "O2: %.03f", o2v);
-    lcd.printAt(0, 0, l0);
-    lcd.printAt(0, 1, "OK refrescar");
+    if (!isfinite(o2v)) {
+      lcd.printAt(0, 0, o2.hasCalibration() ? "O2 lectura error"
+                                            : "O2 sin calibrar");
+      lcd.printAt(0, 1, o2.hasCalibration() ? "OK reintentar"
+                                            : "Recalibre O2");
+    } else {
+      char l0[17]; snprintf(l0, sizeof(l0), "O2: %.03f", o2v);
+      lcd.printAt(0, 0, l0);
+      lcd.printAt(0, 1, "OK refrescar");
+    }
   };
 
   // ---- Init ----
@@ -2562,6 +3254,29 @@ static void MenuDemoTick() {
     remoteManager.log("[MENU] Init -> ROOT");
   }
 
+  webO2CalibrationAllowed =
+      (view == View::ROOT || view == View::CONFIG) &&
+      !uart2.getAutoRunning();
+
+  O2ReferenceRequest webRequest;
+  if (o2ReferenceQueue &&
+      xQueueReceive(o2ReferenceQueue, &webRequest, 0) == pdTRUE) {
+    if (webO2CalibrationAllowed) {
+      o2CalibrationUseReference = webRequest.use_reference;
+      o2WebReferencePpm = webRequest.ppm;
+      o2WebReferenceTempC = webRequest.temp_c;
+      o2CalibrationFromWeb = true;
+      webO2CalibrationAllowed = false;
+      uart2.setBusy(true);
+      view = View::CAL_O2_RUN_1P;
+      lcd.clear();
+    } else {
+      uart2.setLastResult(webRequest.use_reference ? "CAL_O2_REF_BUSY"
+                                                   : "CAL_O2_1P_BUSY");
+      remoteManager.log("O2 patron web descartado: equipo ocupado");
+    }
+  }
+
   // ---- Auto mode trigger por UART ----
   static bool prevAutoReq = false;
   bool autoReq = uart2.getAutoMeasureRequested();
@@ -2569,6 +3284,7 @@ static void MenuDemoTick() {
   if (view == View::ROOT) {
     if ((autoReq && !prevAutoReq) || (autoReq && !autoRun)) {
       view = View::AUTO; autoFirst = true;
+      uart2.setAutoRunning(true);
       remoteManager.log("[MENU] DISPARO AUTO desde ROOT");
     }
   }
@@ -2608,7 +3324,10 @@ static void MenuDemoTick() {
     (view == View::CAL_O2_MENU)  ||
     (view == View::CAL_O2_READ)  ||
     (view == View::CAL_O2_RUN_1P) ||
-    (view == View::CAL_O2_RUN_2P);
+    (view == View::O2_OFFSET) ||
+    (view == View::O2_PRESSURE) ||
+    (view == View::CFG_TIMEOUTS) ||
+    (view == View::CFG_FILL);
   uart2.setBusy(calibBusy);
 
   // ---- FSM ----
@@ -2624,7 +3343,10 @@ static void MenuDemoTick() {
         lcd.clear(); renderRoot(); break;
       case Btn::OK:
         if (rootCursor == 0) { view = View::MANUAL_MENU; lcd.clear(); renderManualMenu(); }
-        else if (rootCursor == 1) { view = View::AUTO; autoFirst = true; lcd.clear(); }
+        else if (rootCursor == 1) {
+          uart2.setAutoRunning(true);
+          view = View::AUTO; autoFirst = true; lcd.clear();
+        }
         else { view = View::CONFIG; lcd.clear(); renderConfig(); }
         break;
       default: break;
@@ -2681,7 +3403,11 @@ static void MenuDemoTick() {
         lcd.clear();
         if (cfgCursor == 0) view = View::CAL_PH_MENU, renderPHMenu();
         else if (cfgCursor == 1) view = View::CAL_O2_MENU, renderO2Menu();
-        else if (cfgCursor == 2) view = View::TEMP, renderTemp();
+        else if (cfgCursor == 2) {
+          tempOffset10 = (int16_t)lroundf((float)temperatureOffsetC * 10.0f);
+          view = View::TEMP;
+          renderTemp();
+        }
         else if (cfgCursor == 3) view = View::CAL_ADS_MENU, renderADSMenu();
         else if (cfgCursor == 4) view = View::CFG_TIMEOUTS;
         else view = View::CFG_FILL;
@@ -2743,8 +3469,23 @@ static void MenuDemoTick() {
         lcd.clear(); renderO2Menu(); break;
       case Btn::OK:
         if (o2Cursor == 0) view = View::CAL_O2_READ, lcd.clear(), renderO2Read();
-        else if (o2Cursor == 1) view = View::CAL_O2_RUN_1P, lcd.clear();
-        else view = View::CAL_O2_RUN_2P, lcd.clear();
+        else if (o2Cursor == 3) {
+          o2Offset10 = (int8_t)lroundf((float)o2MeasurementOffsetMgL * 10.0f);
+          view = View::O2_OFFSET;
+          lcd.clear();
+          renderO2Offset();
+        } else if (o2Cursor == 4) {
+          o2PressureHpa =
+              (int16_t)lroundf((float)o2AtmosphericPressureHpa);
+          view = View::O2_PRESSURE;
+          lcd.clear();
+          renderO2Pressure();
+        } else {
+          o2CalibrationFromWeb = false;
+          o2CalibrationUseReference = o2Cursor == 2;
+          view = View::CAL_O2_RUN_1P;
+          lcd.clear();
+        }
         break;
       case Btn::ESC:
         view = View::CONFIG; lcd.clear(); renderConfig(); break;
@@ -2761,14 +3502,15 @@ static void MenuDemoTick() {
   } break;
 
   case View::CAL_O2_RUN_1P:
-    if (runO2Calibration_1P(31)) {
-      view = View::CAL_O2_MENU; lcd.clear(); renderO2Menu();
-    }
-    break;
-
-  case View::CAL_O2_RUN_2P:
-    if (runO2Calibration_2P(31)) {
-      view = View::CAL_O2_MENU; lcd.clear(); renderO2Menu();
+    if (runO2Calibration_1P(31, o2CalibrationUseReference,
+                           o2CalibrationFromWeb,
+                           o2WebReferencePpm, o2WebReferenceTempC)) {
+      if (o2CalibrationFromWeb) {
+        o2CalibrationFromWeb = false;
+        view = View::ROOT; lcd.clear(); renderRoot();
+      } else {
+        view = View::CAL_O2_MENU; lcd.clear(); renderO2Menu();
+      }
     }
     break;
 
@@ -2783,12 +3525,86 @@ static void MenuDemoTick() {
   // ---------- TEMP ----------
   case View::TEMP: {
     switch (readLatched()) {
-      case Btn::UP: if (tempOffset < 10) ++tempOffset; lcd.clear(); renderTemp(); break;
-      case Btn::DOWN: if (tempOffset > -10) --tempOffset; lcd.clear(); renderTemp(); break;
-      case Btn::OK: lcd.splash("Temp offset", "Guardado", 600); view = View::CONFIG; lcd.clear(); renderConfig(); break;
+      case Btn::UP:
+        if (tempOffset10 < 100) ++tempOffset10;
+        lcd.clear(); renderTemp(); break;
+      case Btn::DOWN:
+        if (tempOffset10 > -100) --tempOffset10;
+        lcd.clear(); renderTemp(); break;
+      case Btn::OK: {
+        String saveError;
+        float newOffset = (float)tempOffset10 / 10.0f;
+        if (saveTemperatureOffsetC(newOffset, saveError)) {
+          lcd.splash("Temp offset", "Guardado", 600);
+        } else {
+          remoteManager.log(String("Temp offset: ") + saveError);
+          lcd.splash("Temp offset", "Save fallo", 700);
+        }
+        view = View::CONFIG; lcd.clear(); renderConfig();
+      } break;
       case Btn::ESC: view = View::CONFIG; lcd.clear(); renderConfig(); break;
       default: break;
     }
   } break;
+
+  case View::O2_OFFSET: {
+    switch (readLatched()) {
+      case Btn::UP:
+        if (o2Offset10 < 50) ++o2Offset10;
+        lcd.clear(); renderO2Offset(); break;
+      case Btn::DOWN:
+        if (o2Offset10 > -50) --o2Offset10;
+        lcd.clear(); renderO2Offset(); break;
+      case Btn::OK: {
+        float newOffset = (float)o2Offset10 / 10.0f;
+        String saveError;
+        if (saveO2MeasurementOffsetMgL(newOffset, saveError)) {
+          lcd.splash("Offset O2", "Guardado", 600);
+        } else {
+          remoteManager.log(String("Offset O2: ") + saveError);
+          lcd.splash("Offset O2", "Save fallo", 700);
+        }
+        view = View::CAL_O2_MENU; lcd.clear(); renderO2Menu();
+      } break;
+      case Btn::ESC:
+        view = View::CAL_O2_MENU; lcd.clear(); renderO2Menu(); break;
+      default: break;
+    }
+  } break;
+
+  case View::O2_PRESSURE: {
+    switch (readLatched()) {
+      case Btn::UP:
+        if (o2PressureHpa < 1100) ++o2PressureHpa;
+        lcd.clear(); renderO2Pressure(); break;
+      case Btn::DOWN:
+        if (o2PressureHpa > 500) --o2PressureHpa;
+        lcd.clear(); renderO2Pressure(); break;
+      case Btn::OK: {
+        float newPressure = (float)o2PressureHpa;
+        const float previousPressure = o2AtmosphericPressureHpa;
+        String saveError;
+        if (saveO2AtmosphericPressureHpa(newPressure, saveError)) {
+          if (fabsf(previousPressure - newPressure) >= 0.5f) {
+            uart2.setLastResult("O2_PRESSURE_CHANGED_RECALIBRATE");
+            lcd.splash("Presion guardada", "Recalibre O2", 900);
+          } else {
+            lcd.splash("Presion O2", "Sin cambios", 600);
+          }
+        } else {
+          remoteManager.log(String("Presion O2: ") + saveError);
+          lcd.splash("Presion O2", "Save fallo", 700);
+        }
+        view = View::CAL_O2_MENU; lcd.clear(); renderO2Menu();
+      } break;
+      case Btn::ESC:
+        view = View::CAL_O2_MENU; lcd.clear(); renderO2Menu(); break;
+      default: break;
+    }
+  } break;
   }
+
+  webO2CalibrationAllowed =
+      (view == View::ROOT || view == View::CONFIG) &&
+      !uart2.getAutoRunning() && !uart2.getBusy();
 }

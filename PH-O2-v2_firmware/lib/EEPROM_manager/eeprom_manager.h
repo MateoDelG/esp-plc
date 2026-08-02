@@ -13,6 +13,7 @@ public:
   // Carga y guarda configuración
   bool load();
   bool save();
+  bool migrationPending() const { return _migrationPending; }
 
   // Restablece a valores por defecto
   void resetDefaults();
@@ -37,6 +38,18 @@ public:
   void setO2Cal(float V1_mV, float T1_C, float V2_mV, float T2_C);
   void getO2Cal(float& V1_mV, float& T1_C, float& V2_mV, float& T2_C) const;
   bool hasO2Cal() const;
+
+  // --- Compensacion sensor de temperatura ---
+  void setTemperatureOffsetC(float offsetC);
+  float temperatureOffsetC() const;
+
+  // --- Offset aditivo de la medicion O2 (mg/L) ---
+  void setO2MeasurementOffsetMgL(float offsetMgL);
+  float o2MeasurementOffsetMgL() const;
+
+  // --- Presion atmosferica absoluta del sitio (hPa) ---
+  void setO2AtmosphericPressureHpa(float pressureHpa);
+  float o2AtmosphericPressureHpa() const;
 
   // --- WiFi ---
   void setWifiCredentials(const char* ssid, const char* pass);
@@ -83,16 +96,25 @@ public:
   const char* lastError() const { return _err; }
 
   // Versión del layout actual
-  static constexpr uint16_t kVersion = 0x000A;  // v10: add wifi credentials
+  static constexpr uint16_t kVersion = 0x000D;  // v13: add O2 atmospheric pressure
 
 private:
+#if defined(ESP32)
+  mutable portMUX_TYPE _mux = portMUX_INITIALIZER_UNLOCKED;
+  void lock_() const { taskENTER_CRITICAL(&_mux); }
+  void unlock_() const { taskEXIT_CRITICAL(&_mux); }
+#else
+  void lock_() const {}
+  void unlock_() const {}
+#endif
+
   // ====== Estructuras ======
   struct Pair  { float scale; float offset; };
   struct PH2pt { float V7; float V4; float tC; };
   struct PH3pt { float V4; float V7; float V10; float tC; };
   struct O2Cal { float V1_mV; float T1_C; float V2_mV; float T2_C; };
 
-  // ====== Estructura persistente (v10) ======
+  // ====== Estructura persistente (v13) ======
   struct ConfigData {
     uint16_t magic;     // 0xC0AD
     uint16_t version;   // kVersion
@@ -126,7 +148,83 @@ private:
     uint32_t o2_stabilization_ms; // Espera de mezcla/estabilización O2
     uint32_t ph_stabilization_ms; // Espera de estabilización pH
 
+    float    temperature_offset_c; // Compensacion aditiva del sensor
+    float    o2_measurement_offset_mg_l; // Correccion final de O2
+    float    o2_atmospheric_pressure_hpa; // Presion absoluta local
+
     uint32_t crc;                // CRC32 (sin incluir este campo)
+  } __attribute__((packed));
+
+  // Layout anterior, necesario para migrar configuraciones v12.
+  struct ConfigDataV12 {
+    uint16_t magic;
+    uint16_t version;
+    Pair     adc;
+    PH2pt    ph2pt;
+    PH3pt    ph3pt;
+    O2Cal    o2cal;
+    char     wifi_ssid[kWifiSsidMax + 1];
+    char     wifi_pass[kWifiPassMax + 1];
+    uint8_t  wifi_auto_reconnect;
+    uint32_t kcl_fill_ms;
+    uint32_t h2o_fill_ms;
+    uint32_t sample_fill_ms;
+    uint32_t drain_ms;
+    uint32_t sample_timeout_ms;
+    uint32_t drain_timeout_ms;
+    uint8_t  sample_count;
+    uint32_t o2_stabilization_ms;
+    uint32_t ph_stabilization_ms;
+    float    temperature_offset_c;
+    float    o2_measurement_offset_mg_l;
+    uint32_t crc;
+  } __attribute__((packed));
+
+  // Layout anterior, necesario para migrar configuraciones v11.
+  struct ConfigDataV11 {
+    uint16_t magic;
+    uint16_t version;
+    Pair     adc;
+    PH2pt    ph2pt;
+    PH3pt    ph3pt;
+    O2Cal    o2cal;
+    char     wifi_ssid[kWifiSsidMax + 1];
+    char     wifi_pass[kWifiPassMax + 1];
+    uint8_t  wifi_auto_reconnect;
+    uint32_t kcl_fill_ms;
+    uint32_t h2o_fill_ms;
+    uint32_t sample_fill_ms;
+    uint32_t drain_ms;
+    uint32_t sample_timeout_ms;
+    uint32_t drain_timeout_ms;
+    uint8_t  sample_count;
+    uint32_t o2_stabilization_ms;
+    uint32_t ph_stabilization_ms;
+    float    temperature_offset_c;
+    uint32_t crc;
+  } __attribute__((packed));
+
+  // Layout anterior, necesario para migrar configuraciones v10.
+  struct ConfigDataV10 {
+    uint16_t magic;
+    uint16_t version;
+    Pair     adc;
+    PH2pt    ph2pt;
+    PH3pt    ph3pt;
+    O2Cal    o2cal;
+    char     wifi_ssid[kWifiSsidMax + 1];
+    char     wifi_pass[kWifiPassMax + 1];
+    uint8_t  wifi_auto_reconnect;
+    uint32_t kcl_fill_ms;
+    uint32_t h2o_fill_ms;
+    uint32_t sample_fill_ms;
+    uint32_t drain_ms;
+    uint32_t sample_timeout_ms;
+    uint32_t drain_timeout_ms;
+    uint8_t  sample_count;
+    uint32_t o2_stabilization_ms;
+    uint32_t ph_stabilization_ms;
+    uint32_t crc;
   } __attribute__((packed));
 
   // ====== Constantes y helpers ======
@@ -146,4 +244,5 @@ private:
   uint16_t   _base = 0;
   ConfigData _cfg{};
   char       _err[64] = {0};
+  bool       _migrationPending = false;
 };

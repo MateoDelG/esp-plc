@@ -159,6 +159,15 @@ static const char INDEX_HTML[] PROGMEM = R"rawliteral(
         <h3>Temp</h3>
         <div class="value" id="tempValue">--</div>
         <div class="row"><span class="muted">Unidades</span><span>C</span></div>
+        <div class="row"><span class="muted">Sensor raw</span><span id="tempRawValue">--</span></div>
+        <div class="row"><span class="muted">Offset</span><span id="tempOffsetValue">--</span></div>
+        <label>Compensacion (-10.0 a +10.0 C)
+          <input id="temp-offset-input" type="number" min="-10" max="10" step="0.1" value="0.0">
+        </label>
+        <div class="btns" style="margin-top:10px;">
+          <button id="temp-offset-button" onclick="saveTemperatureOffset()">Guardar offset</button>
+        </div>
+        <div class="row"><span class="muted" id="temp-offset-result"></span></div>
       </div>
       <div class="card">
         <h3>pH</h3>
@@ -168,6 +177,8 @@ static const char INDEX_HTML[] PROGMEM = R"rawliteral(
         <h3>O2</h3>
         <div class="value" id="o2Value">--</div>
         <div class="row"><span class="muted">Unidades</span><span>mg/L</span></div>
+        <div class="row"><span class="muted">O2 raw</span><span id="o2RawValue">--</span></div>
+        <div class="row"><span class="muted">Offset</span><span id="o2OffsetValue">--</span></div>
       </div>
       <div class="card">
         <h3>Modo</h3>
@@ -195,6 +206,50 @@ static const char INDEX_HTML[] PROGMEM = R"rawliteral(
         <div class="row"><span class="muted" id="calPhVals">--</span></div>
         <div class="row"><span>O2</span><span id="calO2Method">--</span></div>
         <div class="row"><span class="muted" id="calO2Vals">--</span></div>
+      </div>
+      <div class="card">
+        <h3>Calibrar O2</h3>
+        <div class="row"><span class="muted">1P aire: humedezca la sonda y espere estabilidad.</span></div>
+        <div class="btns" style="margin-top:10px;">
+          <button id="o2-1p-button" onclick="calibrateO2Saturation()">Calibrar 1P aire</button>
+        </div>
+        <hr style="border-color:var(--border); margin:14px 0;">
+        <div class="row"><span class="muted">1P contra equipo patron</span></div>
+        <div class="grid">
+          <label>Lectura patron (ppm)
+            <input id="o2-ref-ppm" type="number" min="0.10" max="20.00" step="0.01" value="8.00">
+          </label>
+          <label>Temperatura patron para comparar (C)
+            <input id="o2-ref-temp" type="number" min="0" max="40" step="0.1" value="30.0">
+          </label>
+        </div>
+        <div class="btns" style="margin-top:10px;">
+          <button class="primary" id="o2-ref-button" onclick="calibrateO2Reference()">Calibrar O2</button>
+        </div>
+        <div class="row"><span class="muted" id="o2-ref-result">Ingrese el valor estabilizado del patron.</span></div>
+      </div>
+      <div class="card">
+        <h3>Offset medicion O2</h3>
+        <div class="row"><span class="muted">Correccion independiente de la calibracion.</span></div>
+        <label>Offset (-5.0 a +5.0 mg/L)
+          <input id="o2-offset-input" type="number" min="-5" max="5" step="0.1" value="0.0">
+        </label>
+        <div class="btns" style="margin-top:10px;">
+          <button id="o2-offset-button" onclick="saveO2Offset()">Guardar offset O2</button>
+        </div>
+        <div class="row"><span class="muted" id="o2-offset-result"></span></div>
+      </div>
+      <div class="card">
+        <h3>Presion O2</h3>
+        <div class="row"><span class="muted">Presion absoluta local, no corregida al nivel del mar.</span></div>
+        <div class="row"><span>Configurada</span><span id="o2-pressure-value">--</span></div>
+        <label>Presion absoluta (500-1100 hPa)
+          <input id="o2-pressure-input" type="number" min="500" max="1100" step="1" value="1013">
+        </label>
+        <div class="btns" style="margin-top:10px;">
+          <button id="o2-pressure-button" onclick="saveO2Pressure()">Guardar presion</button>
+        </div>
+        <div class="row"><span class="muted" id="o2-pressure-result">Cambiarla exige recalibrar O2.</span></div>
       </div>
       <div class="card">
         <h3>Bombas</h3>
@@ -278,9 +333,66 @@ static const char INDEX_HTML[] PROGMEM = R"rawliteral(
 
         document.getElementById('phValue').textContent = Number.isFinite(data.ph) ? data.ph.toFixed(3) : '--';
         document.getElementById('o2Value').textContent = Number.isFinite(data.o2) ? (data.o2.toFixed(3) + ' mg/L') : '--';
+        document.getElementById('o2RawValue').textContent = Number.isFinite(data.o2_raw) ? (data.o2_raw.toFixed(3) + ' mg/L') : '--';
+        document.getElementById('o2OffsetValue').textContent = Number.isFinite(data.o2_offset_mg_l) ? ((data.o2_offset_mg_l >= 0 ? '+' : '') + data.o2_offset_mg_l.toFixed(1) + ' mg/L') : '--';
+        const o2OffsetInput = document.getElementById('o2-offset-input');
+        if (o2OffsetInput && !o2OffsetDirty && Number.isFinite(data.o2_offset_mg_l)) {
+          o2OffsetInput.value = data.o2_offset_mg_l.toFixed(1);
+        }
+        document.getElementById('o2-pressure-value').textContent = Number.isFinite(data.o2_pressure_hpa) ? (data.o2_pressure_hpa.toFixed(0) + ' hPa / ' + (data.o2_pressure_hpa / 10).toFixed(1) + ' kPa') : '--';
+        const o2PressureInput = document.getElementById('o2-pressure-input');
+        if (o2PressureInput && !o2PressureDirty && Number.isFinite(data.o2_pressure_hpa)) {
+          o2PressureInput.value = data.o2_pressure_hpa.toFixed(0);
+        }
         document.getElementById('tempValue').textContent = Number.isFinite(data.temp_c) ? (data.temp_c.toFixed(1) + ' C') : '--';
+        document.getElementById('tempRawValue').textContent = Number.isFinite(data.temp_raw_c) ? (data.temp_raw_c.toFixed(1) + ' C') : '--';
+        document.getElementById('tempOffsetValue').textContent = Number.isFinite(data.temp_offset_c) ? ((data.temp_offset_c >= 0 ? '+' : '') + data.temp_offset_c.toFixed(1) + ' C') : '--';
+        const tempOffsetInput = document.getElementById('temp-offset-input');
+        if (tempOffsetInput && !tempOffsetDirty && Number.isFinite(data.temp_offset_c)) {
+          tempOffsetInput.value = data.temp_offset_c.toFixed(1);
+        }
         document.getElementById('autoState').textContent = data.auto_running ? 'AUTO' : 'MANUAL';
         document.getElementById('lastResult').textContent = data.last_result || '--';
+        const o2RefButton = document.getElementById('o2-ref-button');
+        const o2OnePointButton = document.getElementById('o2-1p-button');
+        const o2CalibrationDisabled = !!data.busy || !!data.auto_running ||
+                                      data.last_result === 'CAL_O2_REF_PENDING' ||
+                                      data.last_result === 'CAL_O2_1P_PENDING';
+        if (o2RefButton) {
+          o2RefButton.disabled = o2CalibrationDisabled;
+        }
+        if (o2OnePointButton) o2OnePointButton.disabled = o2CalibrationDisabled;
+        const o2OffsetButton = document.getElementById('o2-offset-button');
+        if (o2OffsetButton) o2OffsetButton.disabled = !!data.busy || !!data.auto_running;
+        const o2PressureButton = document.getElementById('o2-pressure-button');
+        if (o2PressureButton) o2PressureButton.disabled = !!data.busy || !!data.auto_running;
+        const tempOffsetButton = document.getElementById('temp-offset-button');
+        if (tempOffsetButton) tempOffsetButton.disabled = !!data.busy || !!data.auto_running;
+        const o2RefResult = document.getElementById('o2-ref-result');
+        if (o2RefResult && (data.last_result?.startsWith('CAL_O2_REF_') ||
+                            data.last_result?.startsWith('CAL_O2_1P_'))) {
+          const messages = {
+            CAL_O2_REF_PENDING: 'Calibracion solicitada. Capturando sensor...',
+            CAL_O2_REF_OK: 'Calibracion guardada correctamente.',
+            CAL_O2_REF_VOLT_ERR: 'Error leyendo el voltaje O2.',
+            CAL_O2_REF_TEMP_ERR: 'La temperatura del sensor local es invalida.',
+            CAL_O2_REF_INVALID: 'Los datos producen una calibracion invalida.',
+            CAL_O2_REF_SAVE_ERR: 'No se pudo guardar en EEPROM.',
+            CAL_O2_REF_BUSY: 'Solicitud descartada: el equipo esta ocupado.',
+            CAL_O2_REF_QUEUE_ERR: 'No se pudo encolar la calibracion.',
+            CAL_O2_REF_CANCEL: 'Calibracion cancelada.',
+            CAL_O2_1P_PENDING: 'Calibracion 1P solicitada. Capturando sensor...',
+            CAL_O2_1P_OK: 'Calibracion 1P aire guardada correctamente.',
+            CAL_O2_1P_VOLT_ERR: 'Error leyendo el voltaje O2.',
+            CAL_O2_1P_TEMP_ERR: 'La temperatura del sensor local es invalida.',
+            CAL_O2_1P_INVALID: 'La calibracion 1P calculada es invalida.',
+            CAL_O2_1P_SAVE_ERR: 'No se pudo guardar la calibracion 1P.',
+            CAL_O2_1P_BUSY: 'Solicitud 1P descartada: el equipo esta ocupado.',
+            CAL_O2_1P_QUEUE_ERR: 'No se pudo encolar la calibracion 1P.',
+            CAL_O2_1P_CANCEL: 'Calibracion 1P cancelada.'
+          };
+          o2RefResult.textContent = messages[data.last_result] || data.last_result;
+        }
 
         document.getElementById('ipValue').textContent = data.ip || '--';
         document.getElementById('rssiValue').textContent = (data.rssi !== null && data.rssi !== undefined) ? (data.rssi + ' dBm') : '--';
@@ -304,10 +416,8 @@ static const char INDEX_HTML[] PROGMEM = R"rawliteral(
         document.getElementById('calPhVals').textContent = phVals;
 
         let o2Vals = '--';
-        if (o2Method === '2p') {
-          o2Vals = `V1=${data.cal?.o2?.v1?.toFixed(1)} T1=${data.cal?.o2?.t1?.toFixed(1)} V2=${data.cal?.o2?.v2?.toFixed(1)} T2=${data.cal?.o2?.t2?.toFixed(1)}`;
-        } else if (o2Method === '1p') {
-          o2Vals = `V=${data.cal?.o2?.v1?.toFixed(1)} T=${data.cal?.o2?.t1?.toFixed(1)}`;
+        if (o2Method === '1p') {
+          o2Vals = `Vsat=${data.cal?.o2?.v1?.toFixed(1)}mV T=${data.cal?.o2?.t1?.toFixed(1)}C`;
         }
         document.getElementById('calO2Vals').textContent = o2Vals;
 
@@ -355,15 +465,107 @@ static const char INDEX_HTML[] PROGMEM = R"rawliteral(
           headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
           body: body
         });
-        await res.json();
+        const data = await res.json();
         fetchStatus();
         if (action === 'clear_logs') {
           const box = document.getElementById('consoleBox');
           if (box) box.textContent = '';
         }
+        return data;
       } catch (e) {
         console.log('action err', e);
+        return { ok: false, message: 'Error de comunicacion' };
       }
+    }
+
+    async function calibrateO2Reference() {
+      const ppm = Number(document.getElementById('o2-ref-ppm')?.value);
+      const tempC = Number(document.getElementById('o2-ref-temp')?.value);
+      const result = document.getElementById('o2-ref-result');
+      if (!Number.isFinite(ppm) || ppm < 0.10 || ppm > 20.00 ||
+          !Number.isFinite(tempC) || tempC < 0 || tempC > 40) {
+        if (result) result.textContent = 'Valores permitidos: 0.10-20.00 ppm y 0-40 C.';
+        return;
+      }
+
+      const response = await doAction('o2_cal_reference',
+                                      JSON.stringify({ ppm: ppm, temp_c: tempC }));
+      if (result) {
+        result.textContent = response.message ||
+                             (response.ok ? 'Solicitud enviada.' : 'Solicitud rechazada.');
+      }
+    }
+
+    async function calibrateO2Saturation() {
+      const result = document.getElementById('o2-ref-result');
+      const response = await doAction('o2_cal_saturation');
+      if (result) {
+        result.textContent = response.message ||
+                             (response.ok ? 'Solicitud enviada.' : 'Solicitud rechazada.');
+      }
+    }
+
+    let tempOffsetDirty = false;
+    const tempOffsetInput = document.getElementById('temp-offset-input');
+    if (tempOffsetInput) {
+      tempOffsetInput.addEventListener('input', () => { tempOffsetDirty = true; });
+    }
+
+    async function saveTemperatureOffset() {
+      const offsetC = Number(document.getElementById('temp-offset-input')?.value);
+      const result = document.getElementById('temp-offset-result');
+      if (!Number.isFinite(offsetC) || offsetC < -10 || offsetC > 10) {
+        if (result) result.textContent = 'Offset permitido: -10.0 a +10.0 C.';
+        return;
+      }
+
+      const response = await doAction('set_temp_offset',
+                                      JSON.stringify({ offset_c: offsetC }));
+      if (result) result.textContent = response.message ||
+                                       (response.ok ? 'Guardado.' : 'Error.');
+      if (response.ok) tempOffsetDirty = false;
+    }
+
+    let o2OffsetDirty = false;
+    const o2OffsetInput = document.getElementById('o2-offset-input');
+    if (o2OffsetInput) {
+      o2OffsetInput.addEventListener('input', () => { o2OffsetDirty = true; });
+    }
+
+    async function saveO2Offset() {
+      const offsetMgL = Number(document.getElementById('o2-offset-input')?.value);
+      const result = document.getElementById('o2-offset-result');
+      if (!Number.isFinite(offsetMgL) || offsetMgL < -5 || offsetMgL > 5) {
+        if (result) result.textContent = 'Offset permitido: -5.0 a +5.0 mg/L.';
+        return;
+      }
+
+      const response = await doAction('set_o2_offset',
+                                      JSON.stringify({ offset_mg_l: offsetMgL }));
+      if (result) result.textContent = response.message ||
+                                       (response.ok ? 'Guardado.' : 'Error.');
+      if (response.ok) o2OffsetDirty = false;
+    }
+
+    let o2PressureDirty = false;
+    const o2PressureInput = document.getElementById('o2-pressure-input');
+    if (o2PressureInput) {
+      o2PressureInput.addEventListener('input', () => { o2PressureDirty = true; });
+    }
+
+    async function saveO2Pressure() {
+      const pressureHpa = Number(document.getElementById('o2-pressure-input')?.value);
+      const result = document.getElementById('o2-pressure-result');
+      if (!Number.isFinite(pressureHpa) || pressureHpa < 500 || pressureHpa > 1100) {
+        if (result) result.textContent = 'Presion permitida: 500 a 1100 hPa.';
+        return;
+      }
+
+      const response = await doAction('set_o2_pressure',
+                                      JSON.stringify({ pressure_hpa: pressureHpa }));
+      if (result) result.textContent = response.message ||
+                                       (response.ok ? 'Guardada.' : 'Error.');
+      if (response.ok) o2PressureDirty = false;
     }
 
     function togglePump(id) {
@@ -535,15 +737,20 @@ void WebPortalManager::handleStatus_() {
 
   float lastPh = NAN;
   float lastO2 = NAN;
+  float lastRawO2 = NAN;
+  float lastO2Offset = 0.0f;
   float lastTemp = NAN;
+  float lastRawTemp = NAN;
   bool autoRun = false;
+  bool busy = false;
   String lastResult;
 
   if (uart_) {
     lastPh = uart_->getLastPh();
-    lastO2 = uart_->getLastO2();
-    lastTemp = uart_->getLastTempC();
+    uart_->getLastO2Values(lastRawO2, lastO2Offset, lastO2);
+    uart_->getLastTemperatures(lastRawTemp, lastTemp);
     autoRun = uart_->getAutoRunning();
+    busy = uart_->getBusy();
     lastResult = uart_->getLastResult();
   }
 
@@ -557,12 +764,19 @@ void WebPortalManager::handleStatus_() {
   } else {
     doc["o2"] = nullptr;
   }
+  if (isfinite(lastRawO2)) {
+    doc["o2_raw"] = lastRawO2;
+  } else {
+    doc["o2_raw"] = nullptr;
+  }
+    doc["o2_offset_mg_l"] = lastO2Offset;
   if (isfinite(lastTemp)) {
     doc["temp_c"] = lastTemp;
   } else {
     doc["temp_c"] = nullptr;
   }
   doc["auto_running"] = autoRun;
+  doc["busy"] = busy;
   doc["last_result"] = lastResult;
 
   if (WiFi.status() == WL_CONNECTED) {
@@ -616,6 +830,15 @@ void WebPortalManager::handleStatus_() {
     JsonObject calPh = cal["ph"].to<JsonObject>();
     JsonObject calO2 = cal["o2"].to<JsonObject>();
 
+    const float tempOffsetC = eeprom_->temperatureOffsetC();
+    doc["o2_pressure_hpa"] = eeprom_->o2AtmosphericPressureHpa();
+    doc["temp_offset_c"] = tempOffsetC;
+    if (isfinite(lastRawTemp)) {
+      doc["temp_raw_c"] = lastRawTemp;
+    } else {
+      doc["temp_raw_c"] = nullptr;
+    }
+
     float V4 = NAN, V7 = NAN, V10 = NAN, Tcal = NAN;
     if (eeprom_->hasPH3pt()) {
       eeprom_->getPH3pt(V4, V7, V10, Tcal);
@@ -637,15 +860,8 @@ void WebPortalManager::handleStatus_() {
 
     float V1 = NAN, T1 = NAN, V2 = NAN, T2 = NAN;
     eeprom_->getO2Cal(V1, T1, V2, T2);
-    const bool v1ok = isfinite(V1) && isfinite(T1);
-    const bool v2ok = isfinite(V2) && isfinite(T2);
-    if (v1ok && v2ok) {
-      calO2["method"] = "2p";
-      calO2["v1"] = V1;
-      calO2["t1"] = T1;
-      calO2["v2"] = V2;
-      calO2["t2"] = T2;
-    } else if (v1ok) {
+    if (isfinite(V1) && V1 >= 1.0f && V1 <= 4096.0f &&
+        isfinite(T1) && T1 >= 0.0f && T1 <= 40.0f) {
       calO2["method"] = "1p";
       calO2["v1"] = V1;
       calO2["t1"] = T1;

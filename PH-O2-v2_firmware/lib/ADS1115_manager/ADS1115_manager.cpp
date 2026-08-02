@@ -6,35 +6,67 @@ ADS1115Manager::ADS1115Manager(uint8_t i2c_addr, TwoWire* wire)
 : addr_(i2c_addr), wire_(wire) {}
 
 bool ADS1115Manager::begin() {
+  if (!mutex_) mutex_ = xSemaphoreCreateMutex();
+  if (!mutex_) {
+    setError_("No se pudo crear mutex ADS");
+    return false;
+  }
+  if (!lock_()) return false;
   connected_ = ads_.begin(addr_, wire_);
   if (!connected_) {
     setError_("ADS1115 no responde");
+    unlock_();
     return false;
   }
   ads_.setGain(gain_);
   ads_.setDataRate(rate_);
   last_error_[0] = '\0';
+  unlock_();
   return true;
 }
 
 void ADS1115Manager::setGain(adsGain_t g) {
+  if (!lock_()) return;
   gain_ = g;
   if (connected_) ads_.setGain(gain_);
+  unlock_();
 }
 
 void ADS1115Manager::setDataRate(uint16_t r) {
+  if (!lock_()) return;
   rate_ = r;
   if (connected_) ads_.setDataRate(rate_);
+  unlock_();
 }
 
 void ADS1115Manager::setAveraging(uint8_t n) {
+  if (!lock_()) return;
   if (n == 0) n = 1;
   avg_ = n;
+  unlock_();
 }
 
 void ADS1115Manager::setCalibration(float scale, float offset) {
+  if (!lock_()) return;
   cal_scale_  = scale;
   cal_offset_ = offset;
+  unlock_();
+}
+
+bool ADS1115Manager::lock_() {
+  if (!mutex_) {
+    setError_("Mutex ADS no inicializado");
+    return false;
+  }
+  if (xSemaphoreTake(mutex_, portMAX_DELAY) != pdTRUE) {
+    setError_("No se pudo bloquear ADS");
+    return false;
+  }
+  return true;
+}
+
+void ADS1115Manager::unlock_() {
+  xSemaphoreGive(mutex_);
 }
 
 bool ADS1115Manager::checkChannel_(uint8_t ch) {
@@ -104,7 +136,7 @@ bool ADS1115Manager::readOnceRawDiff_(uint8_t pair, int16_t& raw) {
 // }
 
 //mediana aritmética de n lecturas single-ended
-bool ADS1115Manager::readSingleRaw(uint8_t channel, int16_t& raw) {
+bool ADS1115Manager::readSingleRawUnlocked_(uint8_t channel, int16_t& raw) {
   if (!checkChannel_(channel)) return false;
 
   // ---- Dummy para estabilizar tras cambio de MUX/ganancia ----
@@ -197,17 +229,29 @@ bool ADS1115Manager::readSingleRaw(uint8_t channel, int16_t& raw) {
 
 
 
+bool ADS1115Manager::readSingleRaw(uint8_t channel, int16_t& raw) {
+  if (!lock_()) return false;
+  const bool ok = readSingleRawUnlocked_(channel, raw);
+  unlock_();
+  return ok;
+}
+
 bool ADS1115Manager::readSingle(uint8_t channel, float& volts) {
+  if (!lock_()) return false;
   int16_t raw;
-  if (!readSingleRaw(channel, raw)) return false;
+  if (!readSingleRawUnlocked_(channel, raw)) {
+    unlock_();
+    return false;
+  }
 
   float v = ads_.computeVolts(raw);
   last_volts_ = applyCal_(v);
   volts = last_volts_;
+  unlock_();
   return true;
 }
 
-bool ADS1115Manager::readDifferentialRaw(uint8_t pair, int16_t& raw) {
+bool ADS1115Manager::readDifferentialRawUnlocked_(uint8_t pair, int16_t& raw) {
   if (!connected_) {
     setError_("ADS1115 no inicializado");
     return false;
@@ -232,20 +276,37 @@ bool ADS1115Manager::readDifferentialRaw(uint8_t pair, int16_t& raw) {
   return true;
 }
 
+bool ADS1115Manager::readDifferentialRaw(uint8_t pair, int16_t& raw) {
+  if (!lock_()) return false;
+  const bool ok = readDifferentialRawUnlocked_(pair, raw);
+  unlock_();
+  return ok;
+}
+
 bool ADS1115Manager::readDifferential01(float& volts) {
+  if (!lock_()) return false;
   int16_t raw;
-  if (!readDifferentialRaw(0, raw)) return false;
+  if (!readDifferentialRawUnlocked_(0, raw)) {
+    unlock_();
+    return false;
+  }
   float v = ads_.computeVolts(raw);
   last_volts_ = applyCal_(v);
   volts = last_volts_;
+  unlock_();
   return true;
 }
 
 bool ADS1115Manager::readDifferential23(float& volts) {
+  if (!lock_()) return false;
   int16_t raw;
-  if (!readDifferentialRaw(1, raw)) return false;
+  if (!readDifferentialRawUnlocked_(1, raw)) {
+    unlock_();
+    return false;
+  }
   float v = ads_.computeVolts(raw);
   last_volts_ = applyCal_(v);
   volts = last_volts_;
+  unlock_();
   return true;
 }

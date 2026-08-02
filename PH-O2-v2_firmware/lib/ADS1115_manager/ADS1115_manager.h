@@ -4,6 +4,8 @@
 #include <Arduino.h>
 #include <Wire.h>
 #include <Adafruit_ADS1X15.h>
+#include <freertos/FreeRTOS.h>
+#include <freertos/semphr.h>
 
 class ADS1115Manager {
 public:
@@ -54,13 +56,18 @@ private:
   float   last_volts_ = NAN;
   int16_t last_raw_ = 0;
   char    last_error_[64] = {0};
+  SemaphoreHandle_t mutex_ = nullptr;
 
   bool  checkChannel_(uint8_t ch);
   float applyCal_(float v) const { return cal_scale_ * v + cal_offset_; }
   void  setError_(const char* msg);
+  bool  lock_();
+  void  unlock_();
 
   bool readOnceRawSingle_(uint8_t ch, int16_t& raw);
   bool readOnceRawDiff_(uint8_t pair, int16_t& raw);
+  bool readSingleRawUnlocked_(uint8_t channel, int16_t& raw);
+  bool readDifferentialRawUnlocked_(uint8_t pair, int16_t& raw);
 };
 
 #endif // ADS1115_MANAGER_H

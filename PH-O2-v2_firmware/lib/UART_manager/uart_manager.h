@@ -19,7 +19,10 @@ public:
 
   void setLastPh(float v);
   void setLastO2(float v);
+  void setLastO2Values(float rawMgL, float offsetMgL, float finalMgL);
   void setLastTempC(float v);
+  void setLastRawTempC(float v);
+  void setLastTemperatures(float rawC, float correctedC);
   void setLastResult(const String& r);
   void setLastHasData(bool v);
 
@@ -37,7 +40,11 @@ public:
 
   float  getLastPh() const;
   float  getLastO2() const;
+  void   getLastO2Values(float& rawMgL, float& offsetMgL,
+                         float& finalMgL) const;
   float  getLastTempC() const;
+  float  getLastRawTempC() const;
+  void   getLastTemperatures(float& rawC, float& correctedC) const;
   String getLastResult() const;
   bool   getLastHasData() const;
 
@@ -66,7 +73,10 @@ private:
 
   volatile float  last_ph_ = 7.0f;
   volatile float  last_o2_ = NAN;
+  volatile float  last_raw_o2_ = NAN;
+  volatile float  last_o2_offset_ = 0.0f;
   volatile float  last_tempC_ = 25.0f;
+  volatile float  last_raw_tempC_ = NAN;
   String          last_result_ = "OK";
   volatile bool   last_has_data_ = false;
 
@@ -76,12 +86,12 @@ private:
   volatile float  sample_tempC_[4] = {NAN, NAN, NAN, NAN};
 
 #if defined(ESP32)
-  portMUX_TYPE mux_ = portMUX_INITIALIZER_UNLOCKED;
-  void lock()   { taskENTER_CRITICAL(&mux_); }
-  void unlock() { taskEXIT_CRITICAL(&mux_); }
+  mutable portMUX_TYPE mux_ = portMUX_INITIALIZER_UNLOCKED;
+  void lock() const   { taskENTER_CRITICAL(&mux_); }
+  void unlock() const { taskEXIT_CRITICAL(&mux_); }
 #else
-  void lock()   {}
-  void unlock() {}
+  void lock() const   {}
+  void unlock() const {}
 #endif
 
   // Procesamiento de comandos NDJSON
